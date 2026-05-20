@@ -1754,7 +1754,8 @@ Run:
 ```bash
 PATTERN='T''BD|TO''DO|PLACE''HOLDER|FIX''ME|example_replace_me'
 rg -n "$PATTERN" \
-  --glob '!inventory/group_vars/all/vault.yml.example'
+  --glob '!inventory/group_vars/all/vault.yml.example' \
+  --glob '!docs/superpowers/plans/**'
 ```
 
 Expected: no output.
@@ -1764,11 +1765,11 @@ Expected: no output.
 Run:
 
 ```bash
-rg -n "github_pat_|ghp_|gho_|ghu_|ghs_|ghr_|BEGIN .*PRIVATE KEY" .
+rg -n "github_pat_[A-Za-z0-9_]{80,}|gh[pousr]_[A-Za-z0-9_]{36,}|BEGIN .*PRIVATE KEY" \
+  --glob '!docs/superpowers/plans/**' .
 ```
 
-Expected: only `github_pat_example_replace_me` in
-`inventory/group_vars/all/vault.yml.example`.
+Expected: no output.
 
 - [ ] **Step 3: Run final verification**
 

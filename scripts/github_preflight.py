@@ -432,26 +432,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def add_check(target: CheckResult, errors: list[str], warnings: list[str]) -> None:
+    errors.extend(target.errors)
+    warnings.extend(target.warnings)
+
+
+def parse_expiration(value: str, errors: list[str]) -> date:
+    try:
+        return parse_date(value)
+    except ValueError as exc:
+        errors.append(str(exc))
+        return date.today()
+
+
+def parse_today(value: str | None, errors: list[str]) -> date:
+    try:
+        return parse_date(value) if value else datetime.now(UTC).date()
+    except ValueError as exc:
+        errors.append(str(exc))
+        return datetime.now(UTC).date()
+
+
+def collect_local_checks(args: argparse.Namespace) -> tuple[str, CheckResult]:
     errors: list[str] = []
     warnings: list[str] = []
 
-    try:
-        expires_on = parse_date(args.expires_on)
-    except ValueError as exc:
-        errors.append(str(exc))
-        expires_on = date.today()
-
+    expires_on = parse_expiration(args.expires_on, errors)
+    today = parse_today(args.today, errors)
     if "/" not in args.target_repo:
         errors.append("Target repository must be in owner/repo form.")
 
-    try:
-        today = parse_date(args.today) if args.today else datetime.now(UTC).date()
-    except ValueError as exc:
-        errors.append(str(exc))
-        today = datetime.now(UTC).date()
-
+    token = read_token(args.token, args.token_env)
     lifetime = evaluate_pat_lifetime(
         expires_on=expires_on,
         today=today,
@@ -459,83 +470,114 @@ def main(argv: list[str] | None = None) -> int:
         failure_days=args.failure_days,
         max_days=args.max_days,
     )
-    errors.extend(lifetime.errors)
-    warnings.extend(lifetime.warnings)
-
-    token_check = resolve_token(args.token, args.token_env)
-    errors.extend(token_check.errors)
-    warnings.extend(token_check.warnings)
-    token = read_token(args.token, args.token_env)
-
+    add_check(lifetime, errors, warnings)
+    add_check(resolve_token(args.token, args.token_env), errors, warnings)
     runner_labels = [label.strip() for label in args.runner_labels.split(",") if label.strip()]
     label_check = check_runner_labels(
         required_label=args.required_label,
         runner_labels=runner_labels,
     )
-    errors.extend(label_check.errors)
-    warnings.extend(label_check.warnings)
+    add_check(label_check, errors, warnings)
+    return token, CheckResult(errors=errors, warnings=warnings)
 
-    if "/" in args.target_repo and not errors:
-        owner, repo = args.target_repo.split("/", 1)
-        try:
-            repo_data, repo_check = check_repository(
-                api_base_url=args.api_base_url,
-                api_version=args.api_version,
+
+def collect_branch_checks(
+    *,
+    args: argparse.Namespace,
+    token: str,
+    owner: str,
+    repo: str,
+    branch: str,
+) -> CheckResult:
+    errors: list[str] = []
+    warnings: list[str] = []
+    checks = [
+        check_branch_rules(
+            api_base_url=args.api_base_url,
+            api_version=args.api_version,
+            token=token,
+            owner=owner,
+            repo=repo,
+            branch=branch,
+        ),
+        fetch_workflow_audit(
+            api_base_url=args.api_base_url,
+            api_version=args.api_version,
+            token=token,
+            owner=owner,
+            repo=repo,
+            branch=branch,
+            required_label=args.required_label,
+        ),
+        check_codeowners(
+            api_base_url=args.api_base_url,
+            api_version=args.api_version,
+            token=token,
+            owner=owner,
+            repo=repo,
+            branch=branch,
+            required_paths=[
+                ".github/workflows/example.yml",
+                ".github/actions/example/action.yml",
+            ],
+        ),
+    ]
+    for check in checks:
+        add_check(check, errors, warnings)
+    return CheckResult(errors=errors, warnings=warnings)
+
+
+def collect_remote_checks(args: argparse.Namespace, token: str) -> CheckResult:
+    errors: list[str] = []
+    warnings: list[str] = []
+    owner, repo = args.target_repo.split("/", 1)
+
+    try:
+        repo_data, repo_check = check_repository(
+            api_base_url=args.api_base_url,
+            api_version=args.api_version,
+            token=token,
+            owner=owner,
+            repo=repo,
+        )
+        add_check(repo_check, errors, warnings)
+        if repo_data is None or repo_check.errors:
+            return CheckResult(errors=errors, warnings=warnings)
+
+        registration_check = check_registration_token_permission(
+            api_base_url=args.api_base_url,
+            api_version=args.api_version,
+            token=token,
+            owner=owner,
+            repo=repo,
+        )
+        add_check(registration_check, errors, warnings)
+        branch = str(repo_data.get("default_branch", ""))
+        if branch and not registration_check.errors:
+            branch_checks = collect_branch_checks(
+                args=args,
                 token=token,
                 owner=owner,
                 repo=repo,
+                branch=branch,
             )
-            errors.extend(repo_check.errors)
-            warnings.extend(repo_check.warnings)
-            if repo_data is not None and not repo_check.errors:
-                registration_check = check_registration_token_permission(
-                    api_base_url=args.api_base_url,
-                    api_version=args.api_version,
-                    token=token,
-                    owner=owner,
-                    repo=repo,
-                )
-                errors.extend(registration_check.errors)
-                warnings.extend(registration_check.warnings)
-                branch = str(repo_data.get("default_branch", ""))
-                if branch and not registration_check.errors:
-                    branch_check = check_branch_rules(
-                        api_base_url=args.api_base_url,
-                        api_version=args.api_version,
-                        token=token,
-                        owner=owner,
-                        repo=repo,
-                        branch=branch,
-                    )
-                    errors.extend(branch_check.errors)
-                    warnings.extend(branch_check.warnings)
-                    workflow_check = fetch_workflow_audit(
-                        api_base_url=args.api_base_url,
-                        api_version=args.api_version,
-                        token=token,
-                        owner=owner,
-                        repo=repo,
-                        branch=branch,
-                        required_label=args.required_label,
-                    )
-                    errors.extend(workflow_check.errors)
-                    warnings.extend(workflow_check.warnings)
-                    codeowners_check = check_codeowners(
-                        api_base_url=args.api_base_url,
-                        api_version=args.api_version,
-                        token=token,
-                        owner=owner,
-                        repo=repo,
-                        branch=branch,
-                        required_paths=[
-                            ".github/workflows/example.yml",
-                            ".github/actions/example/action.yml",
-                        ],
-                    )
-                    errors.extend(codeowners_check.errors)
-                    warnings.extend(codeowners_check.warnings)
-        except GitHubError as exc:
-            errors.append(str(exc))
+            add_check(branch_checks, errors, warnings)
+    except GitHubError as exc:
+        errors.append(str(exc))
+
+    return CheckResult(errors=errors, warnings=warnings)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    token, local_checks = collect_local_checks(args)
+    add_check(local_checks, errors, warnings)
+
+    if "/" in args.target_repo and not errors:
+        add_check(collect_remote_checks(args, token), errors, warnings)
 
     result = {
         "errors": errors,
