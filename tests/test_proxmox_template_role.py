@@ -66,10 +66,50 @@ elif [[ "$mode" == "existing-vm" ]]; then
     *) echo "unexpected qm $*" >&2; exit 42 ;;
   esac
 elif [[ "$mode" == "create-success" ]]; then
+  state="${FAKE_QM_STATE:?}"
   case "$1" in
-    status) exit 2 ;;
-    config) printf 'name: ubuntu-2404-cloud\ntemplate: 1\n' ;;
-    create|set|template) exit 0 ;;
+    status)
+      if [[ -f "$state" ]]; then exit 0; fi
+      exit 2
+      ;;
+    create) printf 'created\n' > "$state" ;;
+    set)
+      if [[ ! -f "$state" ]]; then exit 44; fi
+      ;;
+    template)
+      if [[ ! -f "$state" ]]; then exit 44; fi
+      printf 'template\n' > "$state"
+      ;;
+    config)
+      if [[ -f "$state" ]] && [[ "$(cat "$state")" == "template" ]]; then
+        printf 'name: ubuntu-2404-cloud\ntemplate: 1\n'
+        exit 0
+      fi
+      exit 2
+      ;;
+    *) echo "unexpected qm $*" >&2; exit 42 ;;
+  esac
+elif [[ "$mode" == "fail-destroy" ]]; then
+  state="${FAKE_QM_STATE:?}"
+  case "$1" in
+    status)
+      if [[ -f "$state" ]]; then exit 0; fi
+      exit 2
+      ;;
+    create) printf 'created\n' > "$state" ;;
+    set)
+      if [[ ! -f "$state" ]]; then exit 44; fi
+      if [[ "$*" == *"--scsi0"* ]]; then
+        echo "import failed" >&2
+        exit 55
+      fi
+      ;;
+    destroy)
+      echo "destroy stdout"
+      echo "destroy stderr" >&2
+      exit 77
+      ;;
+    config) exit 2 ;;
     *) echo "unexpected qm $*" >&2; exit 42 ;;
   esac
 else
@@ -100,6 +140,7 @@ def run_template_playbook(
         "PATH": f"{tmp_path}:{os.environ['PATH']}",
         "FAKE_QM_MODE": mode,
         "FAKE_QM_LOG": str(log),
+        "FAKE_QM_STATE": str(tmp_path / "qm.state"),
     }
     return subprocess.run(
         [
@@ -185,4 +226,23 @@ def test_missing_template_creates_template_and_removes_image(tmp_path: Path) -> 
     assert "set 9000 --scsi0" in log
     assert "set 9000 --ide2" in log
     assert "template 9000" in log
+    assert (tmp_path / "qm.state").read_text() == "template\n"
+    assert not (tmp_path / "cache" / "image.img").exists()
+
+
+def test_failed_partial_cleanup_reports_destroy_failure(tmp_path: Path) -> None:
+    server, extra_vars = image_server_and_vars(tmp_path)
+    with server:
+        proc = run_template_playbook(
+            tmp_path=tmp_path,
+            mode="fail-destroy",
+            extra_vars=extra_vars,
+        )
+    assert proc.returncode != 0
+    log = (tmp_path / "qm.log").read_text()
+    assert "destroy 9000 --purge" in log
+    assert "Partial VM cleanup failed" in proc.stdout
+    assert "rc=77" in proc.stdout
+    assert "stdout=destroy stdout" in proc.stdout
+    assert "stderr=destroy stderr" in proc.stdout
     assert not (tmp_path / "cache" / "image.img").exists()

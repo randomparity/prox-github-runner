@@ -503,7 +503,7 @@ class ImageServer:
         host, port = cast(tuple[str, int], self.httpd.server_address)
         return f"http://{host}:{port}/image.img"
 
-    def __enter__(self) -> "ImageServer":
+    def __enter__(self) -> ImageServer:
         self.thread.start()
         return self
 
@@ -543,6 +543,7 @@ def test_missing_template_creates_template_and_removes_image(tmp_path: Path) -> 
     assert "set 9000 --scsi0" in log
     assert "set 9000 --ide2" in log
     assert "template 9000" in log
+    assert (tmp_path / "qm.state").read_text() == "template\n"
     assert not (tmp_path / "cache" / "image.img").exists()
 ```
 
@@ -550,12 +551,35 @@ Extend the fake `qm` script in `write_fake_qm()` with:
 
 ```bash
 elif [[ "$mode" == "create-success" ]]; then
+  state="${FAKE_QM_STATE:?}"
   case "$1" in
-    status) exit 2 ;;
-    config) printf 'name: ubuntu-2404-cloud\ntemplate: 1\n' ;;
-    create|set|template) exit 0 ;;
+    status)
+      if [[ -f "$state" ]]; then exit 0; fi
+      exit 2
+      ;;
+    create) printf 'created\n' > "$state" ;;
+    set)
+      if [[ ! -f "$state" ]]; then exit 44; fi
+      ;;
+    template)
+      if [[ ! -f "$state" ]]; then exit 44; fi
+      printf 'template\n' > "$state"
+      ;;
+    config)
+      if [[ -f "$state" ]] && [[ "$(cat "$state")" == "template" ]]; then
+        printf 'name: ubuntu-2404-cloud\ntemplate: 1\n'
+        exit 0
+      fi
+      exit 2
+      ;;
     *) echo "unexpected qm $*" >&2; exit 42 ;;
   esac
+```
+
+Update `run_template_playbook()` environment to include:
+
+```python
+"FAKE_QM_STATE": str(tmp_path / "qm.state"),
 ```
 
 - [ ] **Step 2: Run the create-path test to verify it fails**
@@ -664,15 +688,35 @@ Insert this block before `Verify final template config` in
           - destroy
           - "{{ proxmox_template_vmid | string }}"
           - --purge
+      register: proxmox_template_destroy_result
       changed_when: proxmox_template_partial_status.rc == 0
       failed_when: false
       when: proxmox_template_partial_status.rc == 0
 
-    - name: Report template creation failure
+    - name: Fail when partial template cleanup fails
+      ansible.builtin.fail:
+        msg: >-
+          Partial VM cleanup failed for VMID {{ proxmox_template_vmid }}.
+          destroy rc={{ proxmox_template_destroy_result.rc }};
+          stdout={{ proxmox_template_destroy_result.stdout | default('') }};
+          stderr={{ proxmox_template_destroy_result.stderr | default('') }}.
+      when:
+        - proxmox_template_partial_status.rc == 0
+        - proxmox_template_destroy_result.rc != 0
+
+    - name: Report template creation failure after cleanup
       ansible.builtin.fail:
         msg: >-
           Template creation failed for VMID {{ proxmox_template_vmid }}.
-          Partial VM cleanup was attempted.
+          Partial VM cleanup was completed.
+      when: proxmox_template_partial_status.rc == 0
+
+    - name: Report template creation failure without cleanup
+      ansible.builtin.fail:
+        msg: >-
+          Template creation failed for VMID {{ proxmox_template_vmid }}.
+          No partial VM was present for cleanup.
+      when: proxmox_template_partial_status.rc != 0
 
   always:
     - name: Remove downloaded Ubuntu cloud image
@@ -732,11 +776,12 @@ def test_failed_template_creation_destroys_partial_vm(tmp_path: Path) -> None:
     assert proc.returncode != 0
     log = (tmp_path / "qm.log").read_text()
     assert "destroy 9000 --purge" in log
-    assert "Partial VM cleanup was attempted" in proc.stdout
+    assert "Partial VM cleanup was completed" in proc.stdout
     assert not (tmp_path / "cache" / "image.img").exists()
 ```
 
-Extend the fake `qm` script in `write_fake_qm()` with:
+Extend the fake `qm` script in `write_fake_qm()` with this mode. Reuse the
+`FAKE_QM_STATE` environment variable added in Task 4:
 
 ```bash
 elif [[ "$mode" == "fail-import" ]]; then
@@ -746,21 +791,21 @@ elif [[ "$mode" == "fail-import" ]]; then
       if [[ -f "$state" ]]; then exit 0; fi
       exit 2
       ;;
-    create) touch "$state" ;;
+    create) printf 'created\n' > "$state" ;;
     set)
+      if [[ ! -f "$state" ]]; then exit 44; fi
       if [[ "$*" == *"--scsi0"* ]]; then exit 55; fi
-      exit 0
       ;;
     destroy) rm -f "$state" ;;
-    config) printf 'name: ubuntu-2404-cloud\ntemplate: 1\n' ;;
+    config)
+      if [[ -f "$state" ]] && [[ "$(cat "$state")" == "template" ]]; then
+        printf 'name: ubuntu-2404-cloud\ntemplate: 1\n'
+        exit 0
+      fi
+      exit 2
+      ;;
     *) echo "unexpected qm $*" >&2; exit 42 ;;
   esac
-```
-
-Update `run_template_playbook()` environment to include:
-
-```python
-"FAKE_QM_STATE": str(tmp_path / "qm.state"),
 ```
 
 - [ ] **Step 2: Run the rescue test to verify it fails**
@@ -771,11 +816,12 @@ Run:
 pytest tests/test_proxmox_template_role.py::test_failed_template_creation_destroys_partial_vm -q
 ```
 
-Expected: FAIL until the fake `qm` mode and environment support are added.
+Expected: FAIL until the fake `qm` mode support is added.
 
 - [ ] **Step 3: Complete the fake `qm` rescue support**
 
-Apply the fake `qm` and environment changes from Step 1.
+Apply the fake `qm` changes from Step 1, reusing the existing `FAKE_QM_STATE`
+environment support from Task 4.
 
 - [ ] **Step 4: Run all template role tests**
 

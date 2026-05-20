@@ -145,15 +145,35 @@
           - destroy
           - "{{ proxmox_template_vmid | string }}"
           - --purge
+      register: proxmox_template_destroy_result
       changed_when: proxmox_template_partial_status.rc == 0
       failed_when: false
       when: proxmox_template_partial_status.rc == 0
 
-    - name: Report template creation failure
+    - name: Fail when partial template cleanup fails
+      ansible.builtin.fail:
+        msg: >-
+          Partial VM cleanup failed for VMID {{ proxmox_template_vmid }}.
+          destroy rc={{ proxmox_template_destroy_result.rc }};
+          stdout={{ proxmox_template_destroy_result.stdout | default('') }};
+          stderr={{ proxmox_template_destroy_result.stderr | default('') }}.
+      when:
+        - proxmox_template_partial_status.rc == 0
+        - proxmox_template_destroy_result.rc != 0
+
+    - name: Report template creation failure after cleanup
       ansible.builtin.fail:
         msg: >-
           Template creation failed for VMID {{ proxmox_template_vmid }}.
-          Partial VM cleanup was attempted.
+          Partial VM cleanup was completed.
+      when: proxmox_template_partial_status.rc == 0
+
+    - name: Report template creation failure without cleanup
+      ansible.builtin.fail:
+        msg: >-
+          Template creation failed for VMID {{ proxmox_template_vmid }}.
+          No partial VM was present for cleanup.
+      when: proxmox_template_partial_status.rc != 0
 
   always:
     - name: Remove downloaded Ubuntu cloud image
