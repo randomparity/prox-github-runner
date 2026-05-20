@@ -5,14 +5,24 @@ import argparse
 import json
 import os
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from typing import Any
 
 
 @dataclass(frozen=True)
 class CheckResult:
     errors: list[str]
     warnings: list[str]
+
+
+class GitHubError(RuntimeError):
+    def __init__(self, purpose: str, status: int | None, message: str) -> None:
+        self.purpose = purpose
+        self.status = status
+        super().__init__(f"{purpose} failed: {message}")
 
 
 def parse_date(value: str) -> date:
@@ -55,6 +65,111 @@ def resolve_token(token: str | None, token_env: str | None) -> CheckResult:
     if token_env and os.environ.get(token_env):
         return CheckResult(errors=[], warnings=[])
     return CheckResult(errors=["GitHub token was not provided."], warnings=[])
+
+
+def read_token(token: str | None, token_env: str | None) -> str:
+    if token:
+        return token
+    if token_env:
+        return os.environ.get(token_env, "")
+    return ""
+
+
+def request_json(
+    *,
+    api_base_url: str,
+    api_version: str,
+    token: str,
+    method: str,
+    path: str,
+    purpose: str,
+) -> tuple[int, dict[str, Any], dict[str, str]]:
+    url = f"{api_base_url.rstrip('/')}{path}"
+    last_error: str | None = None
+
+    for attempt in range(1, 4):
+        request = urllib.request.Request(url, method=method)
+        request.add_header("accept", "application/vnd.github+json")
+        request.add_header("authorization", f"Bearer {token}")
+        request.add_header("x-github-api-version", api_version)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                data = json.loads(response.read().decode() or "{}")
+                headers = {key.lower(): value for key, value in response.headers.items()}
+                return response.status, data, headers
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode()
+            try:
+                data = json.loads(body or "{}")
+            except json.JSONDecodeError:
+                data = {"message": body}
+            headers = {key.lower(): value for key, value in exc.headers.items()}
+            if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
+                return exc.code, data, headers
+            last_error = f"HTTP {exc.code}"
+        except urllib.error.URLError as exc:
+            last_error = str(exc.reason)
+            if attempt == 3:
+                raise GitHubError(purpose, None, last_error) from exc
+
+    raise GitHubError(purpose, None, last_error or "unknown network error")
+
+
+def check_repository(
+    *,
+    api_base_url: str,
+    api_version: str,
+    token: str,
+    owner: str,
+    repo: str,
+) -> tuple[dict[str, Any] | None, CheckResult]:
+    status, data, _headers = request_json(
+        api_base_url=api_base_url,
+        api_version=api_version,
+        token=token,
+        method="GET",
+        path=f"/repos/{owner}/{repo}",
+        purpose="repository metadata lookup",
+    )
+    if status != 200:
+        return None, CheckResult(
+            errors=[f"GitHub rejected repository metadata lookup with HTTP {status}."],
+            warnings=[],
+        )
+    if data.get("private") is not True:
+        return data, CheckResult(
+            errors=[f"Target repository {owner}/{repo} is public."],
+            warnings=[],
+        )
+    return data, CheckResult(errors=[], warnings=[])
+
+
+def check_registration_token_permission(
+    *,
+    api_base_url: str,
+    api_version: str,
+    token: str,
+    owner: str,
+    repo: str,
+) -> CheckResult:
+    status, data, _headers = request_json(
+        api_base_url=api_base_url,
+        api_version=api_version,
+        token=token,
+        method="POST",
+        path=f"/repos/{owner}/{repo}/actions/runners/registration-token",
+        purpose="runner registration token probe",
+    )
+    if status != 201:
+        message = data.get("message", "unknown GitHub error")
+        return CheckResult(
+            errors=[
+                "GitHub rejected runner registration token probe "
+                f"with HTTP {status}: {message}"
+            ],
+            warnings=[],
+        )
+    return CheckResult(errors=[], warnings=[])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -107,6 +222,32 @@ def main(argv: list[str] | None = None) -> int:
     token_check = resolve_token(args.token, args.token_env)
     errors.extend(token_check.errors)
     warnings.extend(token_check.warnings)
+    token = read_token(args.token, args.token_env)
+
+    if "/" in args.target_repo and not errors:
+        owner, repo = args.target_repo.split("/", 1)
+        try:
+            repo_data, repo_check = check_repository(
+                api_base_url=args.api_base_url,
+                api_version=args.api_version,
+                token=token,
+                owner=owner,
+                repo=repo,
+            )
+            errors.extend(repo_check.errors)
+            warnings.extend(repo_check.warnings)
+            if repo_data is not None and not repo_check.errors:
+                registration_check = check_registration_token_permission(
+                    api_base_url=args.api_base_url,
+                    api_version=args.api_version,
+                    token=token,
+                    owner=owner,
+                    repo=repo,
+                )
+                errors.extend(registration_check.errors)
+                warnings.extend(registration_check.warnings)
+        except GitHubError as exc:
+            errors.append(str(exc))
 
     result = {
         "errors": errors,
