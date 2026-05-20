@@ -12,3 +12,63 @@
       - proxmox_template_memory_mb | int >= 1024
       - proxmox_template_cores | int >= 1
     fail_msg: "Missing or invalid Proxmox template configuration."
+
+- name: Check whether template VMID exists
+  ansible.builtin.command:
+    argv:
+      - qm
+      - status
+      - "{{ proxmox_template_vmid | string }}"
+  register: proxmox_template_status
+  changed_when: false
+  failed_when: false
+
+- name: Record template existence
+  ansible.builtin.set_fact:
+    proxmox_template_exists: "{{ proxmox_template_status.rc == 0 }}"
+
+- name: Read existing template config
+  ansible.builtin.command:
+    argv:
+      - qm
+      - config
+      - "{{ proxmox_template_vmid | string }}"
+  register: proxmox_template_existing_config
+  changed_when: false
+  when: proxmox_template_exists
+
+- name: Fail when existing VMID has a different name
+  ansible.builtin.fail:
+    msg: >-
+      VMID {{ proxmox_template_vmid }} already exists with a different name.
+      Expected {{ proxmox_template_name }}.
+  when:
+    - proxmox_template_exists
+    - >-
+      proxmox_template_existing_config.stdout is not search(
+      '(?m)^name:\s*' ~ (proxmox_template_name | regex_escape) ~ '$')
+
+- name: Fail when existing VMID is not a template
+  ansible.builtin.fail:
+    msg: "VMID {{ proxmox_template_vmid }} exists but is not a template."
+  when:
+    - proxmox_template_exists
+    - proxmox_template_existing_config.stdout is not search('(?m)^template:\s*1$')
+
+- name: Verify final template config
+  ansible.builtin.command:
+    argv:
+      - qm
+      - config
+      - "{{ proxmox_template_vmid | string }}"
+  register: proxmox_template_final_config
+  changed_when: false
+
+- name: Assert final VM is the expected template
+  ansible.builtin.assert:
+    that:
+      - proxmox_template_final_config.stdout is search('(?m)^template:\s*1$')
+      - >-
+        proxmox_template_final_config.stdout is search(
+        '(?m)^name:\s*' ~ (proxmox_template_name | regex_escape) ~ '$')
+    fail_msg: "Proxmox template verification failed for VMID {{ proxmox_template_vmid }}."
