@@ -55,6 +55,112 @@
     - proxmox_template_exists
     - proxmox_template_existing_config.stdout is not search('(?m)^template:\s*1$')
 
+- name: Create Ubuntu cloud image template
+  when: not proxmox_template_exists
+  block:
+    - name: Ensure template image cache directory exists
+      ansible.builtin.file:
+        path: "{{ proxmox_template_image_cache_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download Ubuntu cloud image
+      ansible.builtin.get_url:
+        url: "{{ proxmox_template_cloud_image_url }}"
+        dest: "{{ proxmox_template_image_path }}"
+        checksum: "{{ proxmox_template_cloud_image_checksum }}"
+        mode: "0644"
+
+    - name: Create Proxmox template VM shell
+      ansible.builtin.command:
+        argv:
+          - qm
+          - create
+          - "{{ proxmox_template_vmid | string }}"
+          - --name
+          - "{{ proxmox_template_name }}"
+          - --memory
+          - "{{ proxmox_template_memory_mb | string }}"
+          - --cores
+          - "{{ proxmox_template_cores | string }}"
+          - --net0
+          - "{{ proxmox_template_net0 }}"
+          - --scsihw
+          - "{{ proxmox_template_scsi_controller }}"
+          - --ostype
+          - "{{ proxmox_template_os_type }}"
+      changed_when: true
+
+    - name: Import Ubuntu cloud image disk
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ proxmox_template_vmid | string }}"
+          - --scsi0
+          - "{{ proxmox_template_storage }}:0,import-from={{ proxmox_template_image_path }}"
+      changed_when: true
+
+    - name: Configure cloud-init and guest agent
+      ansible.builtin.command:
+        argv:
+          - qm
+          - set
+          - "{{ proxmox_template_vmid | string }}"
+          - --ide2
+          - "{{ proxmox_template_storage }}:cloudinit"
+          - --boot
+          - order=scsi0
+          - --serial0
+          - socket
+          - --vga
+          - serial0
+          - --agent
+          - enabled=1
+      changed_when: true
+
+    - name: Convert VM to template
+      ansible.builtin.command:
+        argv:
+          - qm
+          - template
+          - "{{ proxmox_template_vmid | string }}"
+      changed_when: true
+
+  rescue:
+    - name: Check for partial template VM after failure
+      ansible.builtin.command:
+        argv:
+          - qm
+          - status
+          - "{{ proxmox_template_vmid | string }}"
+      register: proxmox_template_partial_status
+      changed_when: false
+      failed_when: false
+
+    - name: Destroy partial template VM after failure
+      ansible.builtin.command:
+        argv:
+          - qm
+          - destroy
+          - "{{ proxmox_template_vmid | string }}"
+          - --purge
+      changed_when: proxmox_template_partial_status.rc == 0
+      failed_when: false
+      when: proxmox_template_partial_status.rc == 0
+
+    - name: Report template creation failure
+      ansible.builtin.fail:
+        msg: >-
+          Template creation failed for VMID {{ proxmox_template_vmid }}.
+          Partial VM cleanup was attempted.
+
+  always:
+    - name: Remove downloaded Ubuntu cloud image
+      ansible.builtin.file:
+        path: "{{ proxmox_template_image_path }}"
+        state: absent
+
 - name: Verify final template config
   ansible.builtin.command:
     argv:
