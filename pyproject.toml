@@ -1,0 +1,30 @@
+[project]
+name = "prox-github-runner"
+version = "0.1.0"
+description = "Ansible automation for Proxmox-hosted GitHub Actions runners"
+requires-python = ">=3.13"
+dependencies = [
+  "ansible-core==2.21.0",
+  "PyYAML==6.0.3",
+]
+
+[dependency-groups]
+dev = [
+  "ansible-lint==26.4.0",
+  "pytest==9.0.3",
+  "ruff==0.15.13",
+  "ty==0.0.38",
+  "yamllint==1.38.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]

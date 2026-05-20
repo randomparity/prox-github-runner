@@ -1,0 +1,8 @@
+---
+# Copy to vault.yml, fill values, then encrypt with ansible-vault.
+# ansible-vault encrypt inventory/group_vars/all/vault.yml
+
+vault_github_pat: "github_pat_example_replace_me"
+vault_proxmox_api_user: "ansible@pam!runner"
+vault_proxmox_api_token_secret: "00000000-0000-0000-0000-000000000000"
+vault_runner_bootstrap_password: "replace-me"

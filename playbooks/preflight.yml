@@ -1,0 +1,6 @@
+---
+- name: Run GitHub runner preflight checks
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - preflight
