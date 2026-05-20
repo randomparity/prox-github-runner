@@ -26,12 +26,14 @@ The MVP creates an Ansible project that can:
 - Track the PAT expiration date in non-secret inventory.
 - Fail preflight when the target repository is not private, the PAT is rejected
   by GitHub, the PAT lacks required access, or the PAT expiration date is
-  expired or inside the warning window, defaulting to 14 days.
-- Fail preflight when the repository's default branch lacks pull request review
-  protection, when workflows use `pull_request_target` with the runner label, or
-  when runner labels are too broad.
+  expired, has 7 days or fewer remaining, or is more than 30 days out.
+- Warn without failing when the PAT has 14 days or fewer remaining.
+- Fail preflight when the default branch lacks the minimum review policy through
+  branch protection or active rulesets, CODEOWNERS coverage is missing, unsafe
+  workflows can reach the runner, or runner labels are too broad.
 - Stop the runner service if recurring repository safety checks detect that the
   target repository has become public.
+- Verify runner network isolation from the Proxmox management network.
 - Rerun safely without destroying the VM or forcibly replacing the runner.
 - Provide an unregister-only cleanup playbook.
 - Provide a runner health-check playbook and documented log locations.
@@ -66,8 +68,9 @@ Set up the Ansible repository structure:
 - `playbooks/preflight.yml`.
 - A `preflight` role that validates inventory, target repository privacy, PAT
   acceptance, PAT expiration window, PAT maximum remaining lifetime, runner
-  labels, default-branch protection, and workflow trigger safety without
-  touching Proxmox.
+  labels, default-branch protection or active branch rulesets, CODEOWNERS
+  coverage, and workflow trigger safety without touching Proxmox.
+- A fixture-backed mock GitHub API test harness for preflight negative cases.
 
 Verification:
 
@@ -76,8 +79,11 @@ Verification:
 - YAML lint passes.
 - Vault examples do not contain real secrets.
 - The GitHub preflight can run without touching Proxmox.
-- Preflight fails closed for a public repository, missing branch protection,
-  broad runner labels, and invalid or under-scoped PATs.
+- Preflight fails closed for a public repository, missing effective branch
+  protection, broad runner labels, unsafe workflow triggers,
+  missing CODEOWNERS coverage, and invalid or under-scoped PATs.
+- CI exercises those preflight cases against mock GitHub responses, not live
+  GitHub.
 
 ### Sprint 2: Proxmox Ubuntu Template
 
@@ -102,6 +108,12 @@ Create a `proxmox_vm` role for one runner VM. It clones the template, configures
 CPU, RAM, disk, network, and cloud-init settings, starts the VM, waits for SSH,
 then waits for cloud-init completion with `cloud-init status --wait`.
 
+Apply Proxmox-side network isolation for the runner VM. The VM should run on a
+dedicated VLAN or bridge and have Proxmox firewall rules that deny access to the
+Proxmox management network, the Ansible control host, and configured private
+CIDRs that the runner should not reach. Guest firewall rules are not sufficient,
+because a compromised workflow has root-equivalent access inside the VM.
+
 Reruns are non-destructive. If the VM already exists, the playbook converges
 safe settings, starts it if needed, and waits for SSH. It must not destroy,
 overwrite, or rebuild the VM by default.
@@ -112,6 +124,8 @@ Verification:
 - The VM is started.
 - SSH is reachable.
 - Cloud-init completed successfully.
+- From the runner VM, probes to Proxmox management SSH/API and configured denied
+  CIDRs fail.
 
 ### Sprint 4: Runner Host Baseline
 
@@ -181,11 +195,13 @@ Cleanup is idempotent. If the local runner config or GitHub runner entry is
 already gone, the playbook reports no-op rather than failing.
 
 Add `playbooks/check-runner-health.yml` for routine operator checks. It verifies
-target repository privacy, default-branch protection, unsafe workflow trigger
-usage, runner service state, GitHub API runner status, Docker health, disk
-usage, recent guard and cleanup status, and the runner connectivity check from
-the installed runner application. If the health check cannot verify repository
-safety, it stops the runner service and fails.
+target repository privacy, default-branch protection or active rulesets,
+CODEOWNERS coverage, unsafe workflow trigger usage, runner service state,
+GitHub API runner status, Docker health, disk usage, recent guard and cleanup
+status, and the runner connectivity check from the installed runner
+application. If the health check sees definitive unsafe repository state, it
+stops the runner service when idle or writes a stop-after-current-job flag when
+a job is active.
 
 Documentation covers:
 
@@ -204,7 +220,8 @@ Verification:
 - The local runner service is stopped or removed.
 - The runner no longer appears in GitHub when it was present before cleanup.
 - The health-check playbook reports service, GitHub, Docker, and disk status.
-- The health-check playbook stops the runner when repository safety checks fail.
+- The health-check playbook stops or schedules a stop when repository safety
+  checks return definitive unsafe state.
 
 ### Sprint 7: Smoke Test And MVP Polish
 
@@ -226,6 +243,9 @@ Verification:
 - The workflow template is documented.
 - When copied into `paper-archives`, it can verify checkout, shell, Docker, and
   cleanup behavior on the runner.
+- If the workflow has been copied into `paper-archives`, an operator-run smoke
+  playbook can trigger it with `workflow_dispatch` and poll the result. This is
+  not a local CI-gated test because it needs the private target repository.
 
 ## Architecture
 
@@ -258,13 +278,16 @@ Playbooks:
   the runner service, leaving the VM intact.
 - `playbooks/check-runner-health.yml`: report runner, GitHub, Docker, disk,
   guard, cleanup, and connectivity status.
+- `playbooks/run-smoke-workflow.yml`: operator-run workflow dispatch and polling
+  for the smoke workflow after the operator has copied it to `paper-archives`.
 
 Roles:
 
 - `preflight`: local config validation and GitHub API checks that must run before
   Proxmox changes in `site.yml`.
 - `proxmox_template`: template creation.
-- `proxmox_vm`: VM clone, configuration, startup, and SSH wait.
+- `proxmox_vm`: VM clone, safe configuration convergence, Proxmox firewall
+  attachment, startup, and SSH wait.
 - `runner_host`: Ubuntu packages, Docker, user, directories, and baseline
   tooling, including job hooks, disk cleanup, and the public-repo guard timer.
 - `github_runner`: registration token retrieval, runner install,
@@ -272,6 +295,16 @@ Roles:
 
 This keeps Proxmox provisioning separate from GitHub runner behavior, so future
 operating systems or runner modes can be added without rewriting the MVP.
+
+VM setting convergence is intentionally narrow:
+
+- CPU, memory, description, and tags are updated in place.
+- Disk size may only grow. Shrink requests fail.
+- Runner IP, gateway, VLAN, bridge, template, boot disk, and cloud-init identity
+  changes fail when the VM already exists. The documented procedure is
+  unregister, rebuild explicitly, then converge.
+- SSH public key additions are allowed. Removing keys after first boot is
+  documented as an operator task inside the VM.
 
 ## Data Flow And Secrets
 
@@ -297,6 +330,12 @@ Default timeout values:
 - GitHub API request: 30 seconds per request with three attempts.
 - Runner package download: 5 minutes.
 
+Default PAT lifetime thresholds:
+
+- Warning only: 14 days or fewer remaining.
+- Preflight failure: 7 days or fewer remaining.
+- Preflight failure: more than 30 days remaining.
+
 Vault stores:
 
 - Proxmox API token secret.
@@ -309,25 +348,28 @@ Deploy flow:
    calls `GET /repos/{owner}/{repo}`, fails unless `private` is true, validates
    the PAT with authenticated GitHub API calls, and verifies Administration write
    access by requesting and discarding a short-lived registration token.
-   Preflight also calls
-   `GET /repos/{owner}/{repo}/branches/{default_branch}/protection`, verifies
-   required pull request reviews with at least one approval, verifies
-   runner-label specificity, audits workflow files for unsafe
-   `pull_request_target` usage, and checks PAT lifetime.
+   Preflight checks both legacy branch protection and effective active rules
+   from `GET /repos/{owner}/{repo}/rules/branches/{default_branch}`. It also
+   queries repository rulesets with parent rules included for diagnostics when
+   effective rules are missing. Preflight verifies the minimum review policy,
+   CODEOWNERS coverage, runner-label specificity, workflow safety, broad
+   `runs-on`, and PAT lifetime.
 2. Local Ansible connects to the Proxmox host over SSH for `qm` template
    creation.
 3. Local Ansible uses `community.proxmox` API calls to clone, configure, and
    start the runner VM.
 4. Ansible connects to the new Ubuntu VM after SSH is reachable, then waits for
    cloud-init to complete with an explicit timeout.
-5. The `github_runner` role checks the PAT expiration date before calling
+5. The `runner_host` role installs the host baseline, public-repo guard, and
+   cleanup scripts.
+6. The `github_runner` role invokes preflight again before registration and
+   fails if local runner state points at a different repository than inventory.
+7. The role requests a short-lived repository runner registration token from
    GitHub.
-6. The role requests a short-lived repository runner registration token from
-   GitHub.
-7. The role downloads the pinned GitHub runner package, registers the runner to
+8. The role downloads the pinned GitHub runner package, registers the runner to
    `drc-dot-nz/paper-archives` with automatic runner updates disabled, and
    installs it as a systemd service.
-8. Reruns detect existing runner configuration and converge host state without
+9. Reruns detect existing runner configuration and converge host state without
    re-registering unless cleanup has been run.
 
 Cleanup flow:
@@ -352,13 +394,19 @@ PAT rotation is an operator workflow:
 5. Run the needed converge or cleanup playbook.
 
 If GitHub returns a `github-authentication-token-expiration` response header,
-preflight compares it with `github_pat_expires_on`. A mismatch fails with a
-rotation error so the operator fixes inventory and vault together. If the header
-is absent, the inventory date remains the source of truth.
+preflight compares its UTC calendar date with `github_pat_expires_on`, allowing
+one day of tolerance for timezone and formatting differences. Preflight checks
+the header on the authenticated repository metadata call and the registration
+token probe. A parsable disagreement outside tolerance fails. A malformed or
+absent header produces a warning and leaves the inventory date as the source of
+truth.
 
 The MVP enforces `github_pat_max_remaining_days`, defaulting to 30 days.
 Preflight fails if `github_pat_expires_on` is more than that many days in the
-future, so the high-power PAT must be short lived.
+future, so the high-power PAT must be short lived. It warns, without failing, at
+14 days or fewer remaining and fails at 7 days or fewer remaining. The
+health-check playbook logs the same warning but only stops the runner for actual
+GitHub rejection or definitive unsafe repository state.
 
 ## Threat Model
 
@@ -368,7 +416,8 @@ enforcement has three layers:
 - Deploy preflight calls `GET /repos/{owner}/{repo}` and fails unless GitHub
   reports `private: true`.
 - The health-check playbook repeats the authenticated repository privacy and
-  branch-protection checks. If they fail, it stops the runner service.
+  branch-protection checks. If they return definitive unsafe state, it stops the
+  runner service or schedules a stop after the current job.
 - A runner-side public-repo guard timer performs an unauthenticated GitHub API
   check. A private repository should be invisible without auth; if the target
   repo becomes publicly visible, the guard stops the runner service. This guard
@@ -376,12 +425,18 @@ enforcement has three layers:
 
 The trusted actor model for `paper-archives` is:
 
-- Preflight verifies default-branch protection with required pull request
-  reviews enabled.
-- Preflight verifies runner labels include a repository-specific label and are
-  not only broad labels such as `self-hosted`, `linux`, or `x64`.
-- Preflight audits workflow files and fails if `pull_request_target` jobs target
-  this runner label.
+- Preflight accepts either legacy branch protection or active branch rulesets,
+  but the effective policy must require at least two approving reviews for the
+  default branch.
+- CODEOWNERS must cover `.github/workflows/**`, `.github/actions/**`, and any
+  extra composite-action paths configured in inventory.
+- The effective policy must require CODEOWNER review for those paths.
+- Preflight verifies the runner is configured with a repository-specific label
+  such as `paper-archives`.
+- Preflight audits workflow files and fails if any job that can route to this
+  runner uses only broad labels such as `self-hosted`, `linux`, or `x64`.
+- Preflight audits workflow files and local reusable workflows for unsafe
+  triggers that can reach this runner.
 - The operator still controls who is trusted to approve and merge workflow
   changes.
 
@@ -394,6 +449,9 @@ Residual risks remain in the MVP:
   user's home can carry state between workflow runs.
 - A trusted maintainer or compromised account that can modify workflows can get
   root-equivalent persistent access to the runner VM.
+- If runner network isolation is missing, a compromised workflow can attempt
+  lateral movement toward the Proxmox management network, the Ansible control
+  host, or other VMs.
 - The fine-grained PAT needs Administration write access for runner
   registration. If vault contents are exposed, that PAT can change repository
   settings, branch protection, visibility, collaborators, and other
@@ -402,10 +460,20 @@ Residual risks remain in the MVP:
 
 The MVP mitigates these risks with the private-repo preflight, a dedicated VM,
 recurring repository safety checks, required branch-protection checks, specific
-runner labels, documented workflow-trigger guidance, short-lived PATs, and
-scheduled maintenance. It does not provide strong isolation between jobs.
-Stronger isolation belongs to the future public-repository design with
-ephemeral or JIT runners.
+runner labels, workflow audits, Proxmox-side network isolation, documented
+workflow-trigger guidance, short-lived PATs, and scheduled maintenance. It does
+not provide strong isolation between jobs. Stronger isolation belongs to the
+future public-repository design with ephemeral or JIT runners.
+
+The minimum network policy denies runner VM egress to:
+
+- Proxmox API and SSH management addresses.
+- The Ansible control host.
+- Other configured private VM networks.
+
+Allowed egress is limited to DNS, NTP, GitHub endpoints required by Actions,
+Ubuntu package mirrors, Docker package and registry endpoints, and any
+operator-configured package mirrors needed by `paper-archives`.
 
 PAT compromise response:
 
@@ -423,13 +491,19 @@ Default inventory values:
 - Runner VM CPU: 4 vCPU.
 - Runner VM memory: 8192 MB.
 - Runner VM disk: 128 GB.
-- PAT warning threshold: 14 days.
+- PAT warning threshold: 14 days. This logs a warning and emits the alert hook.
+- PAT failure threshold: 7 days.
 - PAT maximum remaining lifetime: 30 days.
 - Public-repo guard timer: every 15 minutes.
 - Docker and stale workspace cleanup cadence: weekly, run from the runner
   post-job hook when due.
 - Disk health warning threshold: 80 percent used.
 - Disk health failure threshold: 90 percent used.
+- Guard soft-failure threshold: four consecutive soft failures over at least
+  45 minutes.
+- Alert hook: optional local command path. When set, PAT warnings, guard soft
+  failure threshold, guard hard stop, disk warnings, and health-check failures
+  invoke it with a small JSON payload.
 
 Runner job activity is tracked with GitHub's self-hosted runner job hooks:
 
@@ -463,6 +537,72 @@ runner's own hook path and removes only stale data. It does not clean
 language-specific caches under the runner user's home in the MVP; those remain
 an operator or workflow responsibility.
 
+## Runtime Guard Behavior
+
+The public-repo guard runs every 15 minutes from the runner VM without using the
+GitHub PAT. It logs every decision to journald with timestamp, URL, HTTP status,
+GitHub request ID when present, and action taken.
+
+Response handling:
+
+- `200` with `private: false`: hard unsafe signal.
+- `200` with `private: true`: hard unexpected signal, because an unauthenticated
+  request should not see a private repository.
+- `404`: expected private-repo result; reset the soft-failure counter and leave
+  the runner service alone.
+- `301`, `302`, non-JSON `200`, `401`, `403`, `429`, `5xx`, DNS failure, TLS
+  failure, timeout, and network failure: soft failure. Increment the
+  soft-failure counter and leave the runner service alone until the threshold is
+  reached.
+
+Stop behavior:
+
+- If a hard signal arrives and no fresh active-job marker exists, stop the
+  runner service immediately.
+- If a hard signal arrives while a fresh active-job marker exists, write
+  `/run/prox-github-runner/stop-after-job`; the completed-job hook stops the
+  runner service before cleanup.
+- If the soft-failure threshold is reached and no fresh active-job marker
+  exists, stop the runner service and emit the alert hook.
+- If the soft-failure threshold is reached during a job, write
+  `/run/prox-github-runner/stop-after-job` and emit the alert hook.
+
+The guard uses the runner VM's normal egress path. Operators should keep that
+egress path stable and avoid sharing it with high-volume unauthenticated GitHub
+API clients; otherwise rate limits can produce soft failures.
+
+## Workflow Safety Audit
+
+Preflight parses workflow YAML files under `.github/workflows/` and local
+reusable workflows called with `uses: ./.github/workflows/...`. Dynamic
+`runs-on` values that cannot be evaluated from static YAML fail closed unless
+the workflow path is listed in an explicit inventory allowlist.
+
+A workflow targets this runner when any job's `runs-on` can match the runner's
+label set. Every such job must include the repository-specific label, such as
+`paper-archives`; jobs using only broad labels such as `self-hosted`, `linux`,
+or `x64` fail preflight.
+
+Unsafe trigger patterns fail preflight if they can reach this runner:
+
+- `pull_request_target`.
+- `workflow_run`.
+- `issue_comment`.
+- A high-risk workflow that calls a local reusable workflow which targets this
+  runner.
+- A high-risk workflow that uses `actions/checkout` with a pull request head ref
+  or another user-controlled ref before running commands or local actions on
+  this runner.
+
+Composite actions do not choose runners themselves, but they execute on the
+caller runner. Preflight requires CODEOWNERS coverage for `.github/actions/**`
+and any additional local composite-action paths configured in inventory.
+
+CODEOWNERS is read from GitHub-supported locations in priority order:
+`.github/CODEOWNERS`, `CODEOWNERS`, then `docs/CODEOWNERS`. If no CODEOWNERS
+file exists, or if none of its rules cover workflow and local-action paths,
+preflight fails.
+
 ## Failure Recovery
 
 Preflight fails:
@@ -470,9 +610,10 @@ No Proxmox or runner changes are made. Reruns keep failing until the operator
 fixes inventory, the target repo, or vault values.
 
 Recurring safety check fails:
-The runner service is stopped and the failure is logged. Reruns of the health
-check keep failing until repository privacy, branch protection, workflow trigger
-safety, or PAT access is fixed.
+The runner service is stopped when idle or marked to stop after the current job,
+and the failure is logged. Reruns of the health check keep failing until
+repository privacy, branch protection, workflow trigger safety, or PAT access is
+fixed.
 
 Template creation fails:
 A partial template VM may exist. The playbook attempts to purge it before
@@ -486,7 +627,7 @@ available.
 
 Host baseline fails:
 The VM exists with partial package state. Reruns resume package, Docker, user,
-and timer setup after the operator fixes apt, network, or disk issues.
+hook, and guard setup after the operator fixes apt, network, or disk issues.
 
 Runner download fails:
 The host baseline remains and the runner may be absent. Reruns download the
@@ -522,8 +663,10 @@ ansible-playbook playbooks/check-runner-health.yml
 The health check reports:
 
 - Authenticated repository privacy.
-- Default-branch protection and required pull request review status.
-- Workflow trigger audit status for `pull_request_target`.
+- Default-branch protection or active ruleset status.
+- Required pull request review count and CODEOWNER review status.
+- Unsafe workflow trigger audit status.
+- Broad `runs-on` audit status.
 - Runner systemd service state.
 - GitHub API runner status for `drc-dot-nz/paper-archives`.
 - Docker daemon state.
@@ -547,6 +690,11 @@ playbook until external alerting exists. Alerting in the MVP is local and
 fail-closed: unsafe repository state stops the runner service, writes a journald
 entry, and makes the health-check playbook exit nonzero.
 
+The health-check playbook distinguishes definitive unsafe results from transient
+check failures. Definitive unsafe results use the same stop-after-current-job
+behavior as the public-repo guard. Transient GitHub API errors fail the playbook
+and emit the alert hook but do not stop an active runner by themselves.
+
 ## Error Handling And Safety
 
 The MVP fails early before touching infrastructure when:
@@ -554,15 +702,19 @@ The MVP fails early before touching infrastructure when:
 - Required config is missing.
 - The target repo is missing or malformed.
 - GitHub reports the target repo is not private.
-- Default-branch protection or required pull request reviews are absent.
-- Workflow audit finds `pull_request_target` using the runner label.
-- Runner labels are too broad or do not include a repository-specific label.
+- Default-branch protection and active branch rulesets do not enforce the
+  minimum review policy.
+- CODEOWNERS coverage or CODEOWNER review enforcement is missing for workflows
+  and configured local action paths.
+- Workflow audit finds unsafe triggers or broad `runs-on` usage that can reach
+  the runner.
+- Runner labels do not include a repository-specific label.
 - GitHub rejects the PAT.
 - The PAT cannot access the target repo.
 - The PAT cannot request runner registration and removal tokens.
 - The PAT expiration date is invalid.
 - The PAT is expired.
-- The PAT is inside the configured warning window, which defaults to 14 days.
+- The PAT has 7 days or fewer remaining.
 - The PAT expiration date is more than 30 days in the future.
 - Required vault variables are unavailable.
 - Local runner state points to a different repository than inventory.
@@ -594,19 +746,24 @@ Local CI for this repository runs:
 - Ansible lint.
 - Inventory parsing.
 - Ansible syntax checks.
+- Preflight unit tests against a fixture-backed mock GitHub API.
+- Shell lint for runner hook and guard scripts.
 
-Real Proxmox and GitHub integration checks are operator-run commands because
-they require private infrastructure and secrets.
+Real Proxmox, live GitHub, and workflow-dispatch integration checks are
+operator-run commands because they require private infrastructure and secrets.
 
 Sprint-level verification:
 
 - Sprint 1: dependencies install, inventory parses, YAML lint passes, vault
   examples contain no real secrets, and preflight can fail safely before Proxmox
-  changes for public repos, missing branch protection, broad labels, unsafe
-  workflow triggers, invalid PATs, and PATs outside the allowed lifetime window.
+  changes for public repos, missing effective branch protection, missing
+  CODEOWNERS coverage, broad labels, unsafe workflow triggers, invalid PATs, and
+  PATs outside the allowed lifetime window. CI verifies these with mock GitHub
+  responses and workflow fixtures.
 - Sprint 2: Ubuntu 24.04 template exists and reports as a template.
 - Sprint 3: runner VM exists, is started, cloud-init completed, and SSH is
-  reachable; SSH readiness and cloud-init completion are separate checks.
+  reachable; SSH readiness and cloud-init completion are separate checks; denied
+  network probes to Proxmox management and configured private CIDRs fail.
 - Sprint 4: baseline tools exist, Docker Engine is running, cleanup scripts are
   installed, the runner user can run `docker ps`, and the public-repo guard can
   stop the runner service.
