@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import fnmatch
 import json
 import os
 import sys
@@ -10,6 +12,11 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
+
+import yaml
+
+
+UNSAFE_TRIGGERS = {"issue_comment", "pull_request_target", "workflow_run"}
 
 
 @dataclass(frozen=True)
@@ -172,6 +179,143 @@ def check_registration_token_permission(
     return CheckResult(errors=[], warnings=[])
 
 
+def load_workflow(text: str) -> dict[str, Any]:
+    loaded = yaml.load(text, Loader=yaml.BaseLoader)
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def normalize_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return []
+
+
+def workflow_triggers(workflow: dict[str, Any]) -> set[str]:
+    raw = workflow.get("on", {})
+    if isinstance(raw, str):
+        return {raw}
+    if isinstance(raw, list):
+        return {str(item) for item in raw}
+    if isinstance(raw, dict):
+        return {str(key) for key in raw}
+    return set()
+
+
+def job_labels(job: dict[str, Any]) -> list[str]:
+    return normalize_list(job.get("runs-on"))
+
+
+def job_targets_self_hosted(labels: list[str], required_label: str) -> bool:
+    label_set = set(labels)
+    return required_label in label_set or "self-hosted" in label_set
+
+
+def audit_workflow_text(*, path: str, text: str, required_label: str) -> CheckResult:
+    workflow = load_workflow(text)
+    triggers = workflow_triggers(workflow)
+    jobs = workflow.get("jobs", {})
+    errors: list[str] = []
+
+    if not isinstance(jobs, dict):
+        return CheckResult(errors=[], warnings=[])
+
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        labels = job_labels(job)
+        if not labels:
+            continue
+        if "${{" in ",".join(labels):
+            errors.append(f"{path} job {job_name} uses dynamic runs-on.")
+            continue
+        if job_targets_self_hosted(labels, required_label) and required_label not in labels:
+            errors.append(
+                f"{path} job {job_name} targets self-hosted runners without "
+                f"required label {required_label}."
+            )
+        if job_targets_self_hosted(labels, required_label):
+            for trigger in sorted(triggers & UNSAFE_TRIGGERS):
+                errors.append(
+                    f"{path} uses unsafe trigger {trigger} on runner label {required_label}."
+                )
+
+    return CheckResult(errors=errors, warnings=[])
+
+
+def decode_content(data: dict[str, Any]) -> str:
+    content = str(data.get("content", "")).replace("\n", "")
+    return base64.b64decode(content).decode()
+
+
+def normalize_codeowners_pattern(line: str) -> str:
+    pattern = line.split("#", 1)[0].strip()
+    if not pattern:
+        return ""
+    pattern = pattern.split()[0]
+    if pattern.startswith("/"):
+        pattern = pattern[1:]
+    if pattern.endswith("/"):
+        pattern = f"{pattern}**"
+    return pattern
+
+
+def codeowners_covers_path(pattern: str, path: str) -> bool:
+    pattern = normalize_codeowners_pattern(pattern)
+    if not pattern or pattern.startswith("!"):
+        return False
+    if pattern == "*":
+        return True
+    if pattern.endswith("/**"):
+        base = pattern[:-3].rstrip("/")
+        return path == base or path.startswith(f"{base}/")
+    if "/" not in pattern:
+        return fnmatch.fnmatch(path.rsplit("/", 1)[-1], pattern)
+    return fnmatch.fnmatch(path, pattern)
+
+
+def codeowners_has_required_coverage(text: str, required_paths: list[str]) -> bool:
+    patterns = [
+        normalize_codeowners_pattern(line)
+        for line in text.splitlines()
+        if normalize_codeowners_pattern(line)
+    ]
+    for required_path in required_paths:
+        if not any(codeowners_covers_path(pattern, required_path) for pattern in patterns):
+            return False
+    return True
+
+
+def check_codeowners(
+    *,
+    api_base_url: str,
+    api_version: str,
+    token: str,
+    owner: str,
+    repo: str,
+    branch: str,
+    required_paths: list[str],
+) -> CheckResult:
+    for path in [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]:
+        status, data, _headers = request_json(
+            api_base_url=api_base_url,
+            api_version=api_version,
+            token=token,
+            method="GET",
+            path=f"/repos/{owner}/{repo}/contents/{path}?ref={branch}",
+            purpose=f"CODEOWNERS lookup {path}",
+        )
+        if status == 200 and codeowners_has_required_coverage(decode_content(data), required_paths):
+            return CheckResult(errors=[], warnings=[])
+    return CheckResult(
+        errors=[],
+        warnings=["No CODEOWNERS coverage found for workflow or local action paths."],
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GitHub runner preflight checks")
     parser.add_argument("--api-base-url", required=True)
@@ -246,6 +390,22 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 errors.extend(registration_check.errors)
                 warnings.extend(registration_check.warnings)
+                branch = str(repo_data.get("default_branch", ""))
+                if branch and not registration_check.errors:
+                    codeowners_check = check_codeowners(
+                        api_base_url=args.api_base_url,
+                        api_version=args.api_version,
+                        token=token,
+                        owner=owner,
+                        repo=repo,
+                        branch=branch,
+                        required_paths=[
+                            ".github/workflows/example.yml",
+                            ".github/actions/example/action.yml",
+                        ],
+                    )
+                    errors.extend(codeowners_check.errors)
+                    warnings.extend(codeowners_check.warnings)
         except GitHubError as exc:
             errors.append(str(exc))
 
