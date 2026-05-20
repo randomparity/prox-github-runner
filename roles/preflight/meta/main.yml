@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: preflight
+  author: dave
+  description: Validate GitHub repository and runner safety before provisioning.
+  license: MIT
+  min_ansible_version: "2.21"
+  platforms:
+    - name: GenericLinux
+      versions:
+        - all
+dependencies: []

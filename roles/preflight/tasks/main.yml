@@ -1,0 +1,72 @@
+---
+- name: Validate required preflight variables
+  ansible.builtin.assert:
+    that:
+      - github_runner_target_repo is match('^[^/]+/[^/]+$')
+      - github_runner_required_label | length > 0
+      - github_runner_labels | length > 0
+      - github_pat_expires_on is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+      - vault_github_pat is defined
+      - vault_github_pat | length > 0
+    fail_msg: "Missing GitHub preflight config or vault_github_pat."
+
+- name: Run GitHub preflight script
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ preflight_script_path }}"
+      - "--api-base-url"
+      - "{{ github_api_base_url }}"
+      - "--api-version"
+      - "{{ github_api_version }}"
+      - "--target-repo"
+      - "{{ github_runner_target_repo }}"
+      - "--token-env"
+      - GITHUB_TOKEN
+      - "--expires-on"
+      - "{{ github_pat_expires_on }}"
+      - "--warning-days"
+      - "{{ github_pat_warning_days | string }}"
+      - "--failure-days"
+      - "{{ github_pat_failure_days | string }}"
+      - "--max-days"
+      - "{{ github_pat_max_remaining_days | string }}"
+      - "--required-label"
+      - "{{ github_runner_required_label }}"
+      - "--runner-labels"
+      - "{{ github_runner_labels | join(',') }}"
+  environment:
+    GITHUB_TOKEN: "{{ vault_github_pat }}"
+  register: _preflight
+  changed_when: false
+  failed_when: false
+
+- name: Fail if preflight did not produce JSON
+  ansible.builtin.fail:
+    msg: >-
+      GitHub preflight script failed before JSON output.
+      rc={{ _preflight.rc }} stderr={{ _preflight.stderr | default('') }}
+  when: _preflight.stdout | length == 0
+
+- name: Decode preflight JSON
+  ansible.builtin.set_fact:
+    preflight_result: "{{ _preflight.stdout | from_json }}"
+
+- name: Show raw preflight stderr
+  ansible.builtin.debug:
+    msg: "{{ _preflight.stderr }}"
+  when: _preflight.stderr | length > 0
+
+- name: Show preflight warnings
+  ansible.builtin.debug:
+    msg: "{{ preflight_result.warnings }}"
+  when: preflight_result.warnings | length > 0
+
+- name: Fail on preflight errors
+  ansible.builtin.fail:
+    msg: "{{ preflight_result.errors }}"
+  when: preflight_result.errors | length > 0
+
+- name: Show preflight success summary
+  ansible.builtin.debug:
+    msg: "{{ preflight_result.summary }}"

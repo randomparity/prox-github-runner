@@ -1,0 +1,30 @@
+---
+github_api_base_url: "https://api.github.com"
+github_api_version: "2026-03-10"
+github_runner_target_repo: "drc-dot-nz/paper-archives"
+github_runner_required_label: "paper-archives"
+github_runner_labels:
+  - self-hosted
+  - linux
+  - x64
+  - paper-archives
+
+# Placeholder date that intentionally fails until the operator sets the real
+# fine-grained PAT expiration date.
+github_pat_expires_on: "1970-01-01"
+github_pat_warning_days: 14
+github_pat_failure_days: 7
+github_pat_max_remaining_days: 30
+
+github_preflight_alert_hook: ""
+github_preflight_allow_dynamic_workflows: []
+github_preflight_local_action_paths:
+  - ".github/actions/**"
+
+runner_vm_id: 2100
+runner_vm_name: "paper-archives-runner"
+runner_vm_ip: "192.168.20.50"
+runner_vm_gateway: "192.168.20.1"
+runner_vm_cidr: 24
+runner_vm_nameserver: "192.168.20.1"
+runner_bootstrap_user: "runner"
