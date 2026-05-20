@@ -179,6 +179,15 @@ def check_registration_token_permission(
     return CheckResult(errors=[], warnings=[])
 
 
+def check_runner_labels(*, required_label: str, runner_labels: list[str]) -> CheckResult:
+    if required_label not in runner_labels:
+        return CheckResult(
+            errors=[f"Runner labels must include repository-specific label {required_label}."],
+            warnings=[],
+        )
+    return CheckResult(errors=[], warnings=[])
+
+
 def load_workflow(text: str) -> dict[str, Any]:
     loaded = yaml.load(text, Loader=yaml.BaseLoader)
     return loaded if isinstance(loaded, dict) else {}
@@ -316,6 +325,98 @@ def check_codeowners(
     )
 
 
+def check_branch_rules(
+    *,
+    api_base_url: str,
+    api_version: str,
+    token: str,
+    owner: str,
+    repo: str,
+    branch: str,
+) -> CheckResult:
+    status, data, _headers = request_json(
+        api_base_url=api_base_url,
+        api_version=api_version,
+        token=token,
+        method="GET",
+        path=f"/repos/{owner}/{repo}/rules/branches/{branch}",
+        purpose=f"branch rules lookup for {branch}",
+    )
+    if status != 200:
+        return CheckResult(
+            errors=[],
+            warnings=[f"Could not read active branch rules for {branch}: HTTP {status}."],
+        )
+    if not data:
+        return CheckResult(
+            errors=[],
+            warnings=[f"No active branch rules returned for default branch {branch}."],
+        )
+    rule_types = {str(rule.get("type", "")) for rule in data if isinstance(rule, dict)}
+    if "pull_request" not in rule_types:
+        return CheckResult(
+            errors=[],
+            warnings=[f"No pull request review rule returned for default branch {branch}."],
+        )
+    return CheckResult(errors=[], warnings=[])
+
+
+def fetch_workflow_audit(
+    *,
+    api_base_url: str,
+    api_version: str,
+    token: str,
+    owner: str,
+    repo: str,
+    branch: str,
+    required_label: str,
+) -> CheckResult:
+    status, data, _headers = request_json(
+        api_base_url=api_base_url,
+        api_version=api_version,
+        token=token,
+        method="GET",
+        path=f"/repos/{owner}/{repo}/contents/.github/workflows?ref={branch}",
+        purpose="workflow directory listing",
+    )
+    if status == 404:
+        return CheckResult(errors=[], warnings=["No workflow directory found."])
+    if status != 200:
+        return CheckResult(errors=[f"Could not list workflow files: HTTP {status}."], warnings=[])
+    if not isinstance(data, list):
+        return CheckResult(errors=["Workflow directory listing was not a list."], warnings=[])
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path", ""))
+        name = str(entry.get("name", ""))
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        status, content, _headers = request_json(
+            api_base_url=api_base_url,
+            api_version=api_version,
+            token=token,
+            method="GET",
+            path=f"/repos/{owner}/{repo}/contents/{path}?ref={branch}",
+            purpose=f"workflow file fetch {path}",
+        )
+        if status != 200:
+            errors.append(f"Could not fetch workflow file {path}: HTTP {status}.")
+            continue
+        audit = audit_workflow_text(
+            path=path,
+            text=decode_content(content),
+            required_label=required_label,
+        )
+        errors.extend(audit.errors)
+        warnings.extend(audit.warnings)
+
+    return CheckResult(errors=errors, warnings=warnings)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GitHub runner preflight checks")
     parser.add_argument("--api-base-url", required=True)
@@ -368,6 +469,14 @@ def main(argv: list[str] | None = None) -> int:
     warnings.extend(token_check.warnings)
     token = read_token(args.token, args.token_env)
 
+    runner_labels = [label.strip() for label in args.runner_labels.split(",") if label.strip()]
+    label_check = check_runner_labels(
+        required_label=args.required_label,
+        runner_labels=runner_labels,
+    )
+    errors.extend(label_check.errors)
+    warnings.extend(label_check.warnings)
+
     if "/" in args.target_repo and not errors:
         owner, repo = args.target_repo.split("/", 1)
         try:
@@ -392,6 +501,27 @@ def main(argv: list[str] | None = None) -> int:
                 warnings.extend(registration_check.warnings)
                 branch = str(repo_data.get("default_branch", ""))
                 if branch and not registration_check.errors:
+                    branch_check = check_branch_rules(
+                        api_base_url=args.api_base_url,
+                        api_version=args.api_version,
+                        token=token,
+                        owner=owner,
+                        repo=repo,
+                        branch=branch,
+                    )
+                    errors.extend(branch_check.errors)
+                    warnings.extend(branch_check.warnings)
+                    workflow_check = fetch_workflow_audit(
+                        api_base_url=args.api_base_url,
+                        api_version=args.api_version,
+                        token=token,
+                        owner=owner,
+                        repo=repo,
+                        branch=branch,
+                        required_label=args.required_label,
+                    )
+                    errors.extend(workflow_check.errors)
+                    warnings.extend(workflow_check.warnings)
                     codeowners_check = check_codeowners(
                         api_base_url=args.api_base_url,
                         api_version=args.api_version,
