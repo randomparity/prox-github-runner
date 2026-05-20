@@ -37,7 +37,7 @@
       - "{{ github_runner_labels | join(',') }}"
   environment:
     GITHUB_TOKEN: "{{ vault_github_pat }}"
-  register: _preflight
+  register: preflight_command_result
   changed_when: false
   failed_when: false
 
@@ -45,17 +45,18 @@
   ansible.builtin.fail:
     msg: >-
       GitHub preflight script failed before JSON output.
-      rc={{ _preflight.rc }} stderr={{ _preflight.stderr | default('') }}
-  when: _preflight.stdout | length == 0
+      rc={{ preflight_command_result.rc }}
+      stderr={{ preflight_command_result.stderr | default('') }}
+  when: preflight_command_result.stdout | length == 0
 
 - name: Decode preflight JSON
   ansible.builtin.set_fact:
-    preflight_result: "{{ _preflight.stdout | from_json }}"
+    preflight_result: "{{ preflight_command_result.stdout | from_json }}"
 
 - name: Show raw preflight stderr
   ansible.builtin.debug:
-    msg: "{{ _preflight.stderr }}"
-  when: _preflight.stderr | length > 0
+    msg: "{{ preflight_command_result.stderr }}"
+  when: preflight_command_result.stderr | length > 0
 
 - name: Show preflight warnings
   ansible.builtin.debug:

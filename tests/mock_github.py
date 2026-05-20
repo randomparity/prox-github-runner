@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, cast
+
+type JsonBody = dict[str, Any] | list[Any]
+type RouteMap = Mapping[tuple[str, str], tuple[int, JsonBody]]
 
 
 class MockGitHubServer:
-    def __init__(self, routes: dict[tuple[str, str], tuple[int, dict[str, Any]]]) -> None:
+    def __init__(self, routes: RouteMap) -> None:
         self.routes = routes
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
 
     @property
     def url(self) -> str:
-        host, port = self.httpd.server_address
+        host, port = cast(tuple[str, int], self.httpd.server_address)
         return f"http://{host}:{port}"
 
     def __enter__(self) -> MockGitHubServer:
@@ -35,7 +39,7 @@ class MockGitHubServer:
             def do_POST(self) -> None:
                 self._respond("POST")
 
-            def log_message(self, _format: str, *_args: object) -> None:
+            def log_message(self, format: str, *args: Any) -> None:
                 return
 
             def _respond(self, method: str) -> None:

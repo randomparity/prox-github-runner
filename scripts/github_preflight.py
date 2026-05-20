@@ -10,11 +10,10 @@ import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import yaml
-
 
 UNSAFE_TRIGGERS = {"issue_comment", "pull_request_target", "workflow_run"}
 
@@ -171,8 +170,7 @@ def check_registration_token_permission(
         message = data.get("message", "unknown GitHub error")
         return CheckResult(
             errors=[
-                "GitHub rejected runner registration token probe "
-                f"with HTTP {status}: {message}"
+                f"GitHub rejected runner registration token probe with HTTP {status}: {message}"
             ],
             warnings=[],
         )
@@ -449,10 +447,10 @@ def main(argv: list[str] | None = None) -> int:
         errors.append("Target repository must be in owner/repo form.")
 
     try:
-        today = parse_date(args.today) if args.today else datetime.now(timezone.utc).date()
+        today = parse_date(args.today) if args.today else datetime.now(UTC).date()
     except ValueError as exc:
         errors.append(str(exc))
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
 
     lifetime = evaluate_pat_lifetime(
         expires_on=expires_on,

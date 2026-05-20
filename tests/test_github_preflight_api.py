@@ -8,7 +8,6 @@ from typing import Any
 
 from tests.mock_github import MockGitHubServer
 
-
 BASE_ARGS = [
     sys.executable,
     "scripts/github_preflight.py",
@@ -111,9 +110,7 @@ def test_missing_codeowners_warns_but_does_not_fail() -> None:
     with MockGitHubServer(routes) as server:
         code, result = run_preflight(server.url)
     assert code == 0
-    assert "No CODEOWNERS coverage found for workflow or local action paths." in result[
-        "warnings"
-    ]
+    assert "No CODEOWNERS coverage found for workflow or local action paths." in result["warnings"]
 
 
 def test_codeowners_without_required_paths_warns() -> None:
@@ -139,9 +136,7 @@ def test_codeowners_without_required_paths_warns() -> None:
     with MockGitHubServer(routes) as server:
         code, result = run_preflight(server.url)
     assert code == 0
-    assert "No CODEOWNERS coverage found for workflow or local action paths." in result[
-        "warnings"
-    ]
+    assert "No CODEOWNERS coverage found for workflow or local action paths." in result["warnings"]
 
 
 def test_missing_required_runner_label_fails_without_network() -> None:
@@ -159,9 +154,9 @@ def test_missing_required_runner_label_fails_without_network() -> None:
     )
     result = json.loads(proc.stdout)
     assert proc.returncode == 1
-    assert "Runner labels must include repository-specific label paper-archives." in result[
-        "errors"
-    ]
+    assert (
+        "Runner labels must include repository-specific label paper-archives." in result["errors"]
+    )
 
 
 def test_empty_branch_rules_warns() -> None:
