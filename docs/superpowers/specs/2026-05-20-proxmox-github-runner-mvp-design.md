@@ -28,9 +28,10 @@ The MVP creates an Ansible project that can:
   by GitHub, the PAT lacks required access, or the PAT expiration date is
   expired, has 7 days or fewer remaining, or is more than 30 days out.
 - Warn without failing when the PAT has 14 days or fewer remaining.
-- Fail preflight when the default branch lacks the minimum review policy through
-  branch protection or active rulesets, CODEOWNERS coverage is missing, unsafe
-  workflows can reach the runner, or runner labels are too broad.
+- Report branch protection, ruleset, and CODEOWNERS posture as warnings because
+  `paper-archives` is a solo-developer repository.
+- Fail preflight when unsafe workflows can reach the runner or runner labels are
+  too broad.
 - Stop the runner service if recurring repository safety checks detect that the
   target repository has become public.
 - Verify runner network isolation from the Proxmox management network.
@@ -68,8 +69,8 @@ Set up the Ansible repository structure:
 - `playbooks/preflight.yml`.
 - A `preflight` role that validates inventory, target repository privacy, PAT
   acceptance, PAT expiration window, PAT maximum remaining lifetime, runner
-  labels, default-branch protection or active branch rulesets, CODEOWNERS
-  coverage, and workflow trigger safety without touching Proxmox.
+  labels, branch protection or active branch ruleset posture, CODEOWNERS posture,
+  and workflow trigger safety without touching Proxmox.
 - A fixture-backed mock GitHub API test harness for preflight negative cases.
 
 Verification:
@@ -79,9 +80,10 @@ Verification:
 - YAML lint passes.
 - Vault examples do not contain real secrets.
 - The GitHub preflight can run without touching Proxmox.
-- Preflight fails closed for a public repository, missing effective branch
-  protection, broad runner labels, unsafe workflow triggers,
-  missing CODEOWNERS coverage, and invalid or under-scoped PATs.
+- Preflight fails closed for a public repository, broad runner labels, unsafe
+  workflow triggers, and invalid or under-scoped PATs.
+- Preflight warns, without failing, for missing branch protection, missing active
+  branch rulesets, and missing CODEOWNERS coverage.
 - CI exercises those preflight cases against mock GitHub responses, not live
   GitHub.
 
@@ -202,6 +204,10 @@ status, and the runner connectivity check from the installed runner
 application. If the health check sees definitive unsafe repository state, it
 stops the runner service when idle or writes a stop-after-current-job flag when
 a job is active.
+
+In solo-developer mode, missing review protection, missing active branch rules,
+and missing CODEOWNERS coverage are not definitive unsafe states. They are
+reported as warnings because the repository owner can bypass them.
 
 Documentation covers:
 
@@ -351,9 +357,9 @@ Deploy flow:
    Preflight checks both legacy branch protection and effective active rules
    from `GET /repos/{owner}/{repo}/rules/branches/{default_branch}`. It also
    queries repository rulesets with parent rules included for diagnostics when
-   effective rules are missing. Preflight verifies the minimum review policy,
-   CODEOWNERS coverage, runner-label specificity, workflow safety, broad
-   `runs-on`, and PAT lifetime.
+   effective rules are missing. Preflight reports review-policy and CODEOWNERS
+   posture, verifies runner-label specificity, audits workflow safety and broad
+   `runs-on`, and checks PAT lifetime.
 2. Local Ansible connects to the Proxmox host over SSH for `qm` template
    creation.
 3. Local Ansible uses `community.proxmox` API calls to clone, configure, and
@@ -425,12 +431,16 @@ enforcement has three layers:
 
 The trusted actor model for `paper-archives` is:
 
-- Preflight accepts either legacy branch protection or active branch rulesets,
-  but the effective policy must require at least two approving reviews for the
-  default branch.
-- CODEOWNERS must cover `.github/workflows/**`, `.github/actions/**`, and any
-  extra composite-action paths configured in inventory.
-- The effective policy must require CODEOWNER review for those paths.
+- `paper-archives` is a solo-developer repository. Branch protection,
+  required-review counts, and CODEOWNERS cannot be treated as a hard safety
+  boundary because the owner can bypass them.
+- Preflight reports whether legacy branch protection, active branch rulesets,
+  required reviews, and CODEOWNERS coverage exist.
+- CODEOWNERS posture covers `.github/workflows/**`, `.github/actions/**`, and
+  any extra composite-action paths configured in inventory when those paths
+  exist.
+- Missing review protection or CODEOWNERS coverage emits a warning and alert
+  hook event, not a preflight failure.
 - Preflight verifies the runner is configured with a repository-specific label
   such as `paper-archives`.
 - Preflight audits workflow files and fails if any job that can route to this
@@ -459,11 +469,13 @@ Residual risks remain in the MVP:
   revoked.
 
 The MVP mitigates these risks with the private-repo preflight, a dedicated VM,
-recurring repository safety checks, required branch-protection checks, specific
+recurring repository safety checks, review-policy posture reporting, specific
 runner labels, workflow audits, Proxmox-side network isolation, documented
 workflow-trigger guidance, short-lived PATs, and scheduled maintenance. It does
-not provide strong isolation between jobs. Stronger isolation belongs to the
-future public-repository design with ephemeral or JIT runners.
+not provide strong isolation between jobs, and it does not prevent the solo
+owner or a compromised owner account from changing workflow code. Stronger
+isolation belongs to the future public-repository design with ephemeral or JIT
+runners.
 
 The minimum network policy denies runner VM egress to:
 
@@ -595,13 +607,14 @@ Unsafe trigger patterns fail preflight if they can reach this runner:
   this runner.
 
 Composite actions do not choose runners themselves, but they execute on the
-caller runner. Preflight requires CODEOWNERS coverage for `.github/actions/**`
+caller runner. Preflight reports whether CODEOWNERS covers `.github/actions/**`
 and any additional local composite-action paths configured in inventory.
 
 CODEOWNERS is read from GitHub-supported locations in priority order:
 `.github/CODEOWNERS`, `CODEOWNERS`, then `docs/CODEOWNERS`. If no CODEOWNERS
 file exists, or if none of its rules cover workflow and local-action paths,
-preflight fails.
+preflight warns and emits the alert hook, but it does not fail in
+solo-developer mode.
 
 ## Failure Recovery
 
@@ -663,8 +676,8 @@ ansible-playbook playbooks/check-runner-health.yml
 The health check reports:
 
 - Authenticated repository privacy.
-- Default-branch protection or active ruleset status.
-- Required pull request review count and CODEOWNER review status.
+- Default-branch protection or active ruleset posture.
+- Required pull request review count and CODEOWNER posture.
 - Unsafe workflow trigger audit status.
 - Broad `runs-on` audit status.
 - Runner systemd service state.
@@ -702,10 +715,6 @@ The MVP fails early before touching infrastructure when:
 - Required config is missing.
 - The target repo is missing or malformed.
 - GitHub reports the target repo is not private.
-- Default-branch protection and active branch rulesets do not enforce the
-  minimum review policy.
-- CODEOWNERS coverage or CODEOWNER review enforcement is missing for workflows
-  and configured local action paths.
 - Workflow audit finds unsafe triggers or broad `runs-on` usage that can reach
   the runner.
 - Runner labels do not include a repository-specific label.
@@ -718,6 +727,10 @@ The MVP fails early before touching infrastructure when:
 - The PAT expiration date is more than 30 days in the future.
 - Required vault variables are unavailable.
 - Local runner state points to a different repository than inventory.
+
+The MVP warns, without failing, when branch protection, active branch rulesets,
+required reviews, or CODEOWNERS coverage are missing. These checks are not hard
+gates in solo-developer mode.
 
 GitHub API failures include the endpoint purpose, HTTP status, GitHub request
 ID when present, and likely fix, but never echo tokens.
@@ -756,10 +769,11 @@ Sprint-level verification:
 
 - Sprint 1: dependencies install, inventory parses, YAML lint passes, vault
   examples contain no real secrets, and preflight can fail safely before Proxmox
-  changes for public repos, missing effective branch protection, missing
-  CODEOWNERS coverage, broad labels, unsafe workflow triggers, invalid PATs, and
-  PATs outside the allowed lifetime window. CI verifies these with mock GitHub
-  responses and workflow fixtures.
+  changes for public repos, broad labels, unsafe workflow triggers, invalid
+  PATs, and PATs outside the allowed lifetime window. CI verifies these with
+  mock GitHub responses and workflow fixtures. CI also verifies warning output
+  for missing branch protection, missing active rulesets, and missing CODEOWNERS
+  coverage.
 - Sprint 2: Ubuntu 24.04 template exists and reports as a template.
 - Sprint 3: runner VM exists, is started, cloud-init completed, and SSH is
   reachable; SSH readiness and cloud-init completion are separate checks; denied
