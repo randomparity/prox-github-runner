@@ -5,7 +5,5 @@ proxmox_template_os_type: "l26"
 proxmox_template_image_path: >-
   {{ proxmox_template_image_cache_dir }}/{{ proxmox_template_cloud_image_filename }}
 proxmox_template_net0: >-
-  virtio,bridge={{ proxmox_template_bridge }}
-  {%- if proxmox_template_vlan is defined and proxmox_template_vlan is not none -%}
-  ,tag={{ proxmox_template_vlan }}
-  {%- endif -%}
+  virtio,bridge={{ proxmox_template_bridge }}{%- if proxmox_template_vlan | d(none) is not none -%}
+  ,tag={{ proxmox_template_vlan }}{%- endif -%}
