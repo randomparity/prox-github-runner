@@ -1,0 +1,14 @@
+---
+- name: Validate Proxmox template variables
+  ansible.builtin.assert:
+    that:
+      - proxmox_template_vmid | int > 0
+      - proxmox_template_name | length > 0
+      - proxmox_template_storage | length > 0
+      - proxmox_template_bridge | length > 0
+      - proxmox_template_cloud_image_url is match('^https?://')
+      - proxmox_template_cloud_image_filename | length > 0
+      - proxmox_template_cloud_image_checksum is match('^sha256:[a-f0-9]{64}$')
+      - proxmox_template_memory_mb | int >= 1024
+      - proxmox_template_cores | int >= 1
+    fail_msg: "Missing or invalid Proxmox template configuration."
