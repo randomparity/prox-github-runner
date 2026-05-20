@@ -259,6 +259,7 @@ git commit -m "Add Ansible project tooling"
 - Create: `inventory/group_vars/runner/vars.yml`
 - Create: `playbooks/preflight.yml`
 - Create: `roles/preflight/defaults/main.yml`
+- Create: `roles/preflight/meta/main.yml`
 - Create: `roles/preflight/tasks/main.yml`
 
 - [ ] **Step 1: Create static inventory**
@@ -297,7 +298,9 @@ github_runner_labels:
   - x64
   - paper-archives
 
-github_pat_expires_on: "2026-06-19"
+# Placeholder date that intentionally fails until the operator sets the real
+# fine-grained PAT expiration date.
+github_pat_expires_on: "1970-01-01"
 github_pat_warning_days: 14
 github_pat_failure_days: 7
 github_pat_max_remaining_days: 30
@@ -371,6 +374,24 @@ Create `roles/preflight/defaults/main.yml`:
 ---
 preflight_script_path: "{{ playbook_dir }}/../scripts/github_preflight.py"
 preflight_timeout_seconds: 60
+preflight_hide_command: true
+```
+
+Create `roles/preflight/meta/main.yml`:
+
+```yaml
+---
+galaxy_info:
+  role_name: preflight
+  author: dave
+  description: Validate GitHub repository and runner safety before provisioning.
+  license: MIT
+  min_ansible_version: "2.21"
+  platforms:
+    - name: GenericLinux
+      versions:
+        - all
+dependencies: []
 ```
 
 Create `roles/preflight/tasks/main.yml`:
@@ -415,11 +436,17 @@ Create `roles/preflight/tasks/main.yml`:
       - "{{ github_runner_labels | join(',') }}"
   register: _preflight
   changed_when: false
-  no_log: true
+  failed_when: false
+  no_log: "{{ preflight_hide_command | default(true) }}"
 
 - name: Decode preflight JSON
   ansible.builtin.set_fact:
     preflight_result: "{{ _preflight.stdout | from_json }}"
+
+- name: Show raw preflight stderr
+  ansible.builtin.debug:
+    msg: "{{ _preflight.stderr }}"
+  when: _preflight.stderr | length > 0
 
 - name: Show preflight warnings
   ansible.builtin.debug:
@@ -539,6 +566,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any
 
 import yaml
@@ -603,6 +631,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warning-days", type=int, required=True)
     parser.add_argument("--failure-days", type=int, required=True)
     parser.add_argument("--max-days", type=int, required=True)
+    parser.add_argument("--today")
     parser.add_argument("--required-label", required=True)
     parser.add_argument("--runner-labels", required=True)
     args = parser.parse_args(argv)
@@ -621,7 +650,7 @@ def main(argv: list[str] | None = None) -> int:
 
     lifetime = evaluate_pat_lifetime(
         expires_on=expires_on,
-        today=datetime.now(timezone.utc).date(),
+        today=parse_date(args.today) if args.today else datetime.now(timezone.utc).date(),
         warning_days=args.warning_days,
         failure_days=args.failure_days,
         max_days=args.max_days,
@@ -760,6 +789,8 @@ BASE_ARGS = [
     "7",
     "--max-days",
     "30",
+    "--today",
+    "2026-05-20",
     "--required-label",
     "paper-archives",
     "--runner-labels",
@@ -833,25 +864,34 @@ def request_json(
     purpose: str,
 ) -> tuple[int, dict[str, Any], dict[str, str]]:
     url = f"{api_base_url.rstrip('/')}{path}"
-    request = urllib.request.Request(url, method=method)
-    request.add_header("accept", "application/vnd.github+json")
-    request.add_header("authorization", f"Bearer {token}")
-    request.add_header("x-github-api-version", api_version)
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = json.loads(response.read().decode() or "{}")
-            headers = {key.lower(): value for key, value in response.headers.items()}
-            return response.status, data, headers
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode()
+    last_error: str | None = None
+
+    for attempt in range(1, 4):
+        request = urllib.request.Request(url, method=method)
+        request.add_header("accept", "application/vnd.github+json")
+        request.add_header("authorization", f"Bearer {token}")
+        request.add_header("x-github-api-version", api_version)
         try:
-            data = json.loads(body or "{}")
-        except json.JSONDecodeError:
-            data = {"message": body}
-        headers = {key.lower(): value for key, value in exc.headers.items()}
-        return exc.code, data, headers
-    except urllib.error.URLError as exc:
-        raise GitHubError(purpose, None, str(exc.reason)) from exc
+            with urllib.request.urlopen(request, timeout=30) as response:
+                data = json.loads(response.read().decode() or "{}")
+                headers = {key.lower(): value for key, value in response.headers.items()}
+                return response.status, data, headers
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode()
+            try:
+                data = json.loads(body or "{}")
+            except json.JSONDecodeError:
+                data = {"message": body}
+            headers = {key.lower(): value for key, value in exc.headers.items()}
+            if exc.code not in {429, 500, 502, 503, 504} or attempt == 3:
+                return exc.code, data, headers
+            last_error = f"HTTP {exc.code}"
+        except urllib.error.URLError as exc:
+            last_error = str(exc.reason)
+            if attempt == 3:
+                raise GitHubError(purpose, None, last_error) from exc
+
+    raise GitHubError(purpose, None, last_error or "unknown network error")
 
 
 def check_repository(
@@ -1016,6 +1056,28 @@ jobs:
     ]
 
 
+def test_broad_label_with_unsafe_trigger_reports_both_errors() -> None:
+    workflow = """
+on: pull_request_target
+jobs:
+  ci:
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - run: make test
+"""
+    result = audit_workflow_text(
+        path=".github/workflows/ci.yml",
+        text=workflow,
+        required_label="paper-archives",
+    )
+    assert result.errors == [
+        ".github/workflows/ci.yml job ci targets self-hosted runners without "
+        "required label paper-archives.",
+        ".github/workflows/ci.yml uses unsafe trigger pull_request_target on "
+        "runner label paper-archives.",
+    ]
+
+
 def test_repo_specific_label_on_push_passes() -> None:
     workflow = """
 on: push
@@ -1110,7 +1172,7 @@ def audit_workflow_text(*, path: str, text: str, required_label: str) -> CheckRe
                 f"{path} job {job_name} targets self-hosted runners without "
                 f"required label {required_label}."
             )
-        if required_label in labels:
+        if job_targets_self_hosted(labels, required_label):
             unsafe = sorted(triggers & UNSAFE_TRIGGERS)
             for trigger in unsafe:
                 errors.append(
@@ -1170,6 +1232,35 @@ def test_missing_codeowners_warns_but_does_not_fail() -> None:
     assert "No CODEOWNERS coverage found for workflow or local action paths." in result[
         "warnings"
     ]
+
+
+def test_codeowners_without_required_paths_warns() -> None:
+    codeowners = "/src/** @drc-dot-nz"
+    routes = {
+        ("GET", "/repos/drc-dot-nz/paper-archives"): (
+            200,
+            {"private": True, "default_branch": "main"},
+        ),
+        ("POST", "/repos/drc-dot-nz/paper-archives/actions/runners/registration-token"): (
+            201,
+            {"token": "short-lived"},
+        ),
+        ("GET", "/repos/drc-dot-nz/paper-archives/rules/branches/main"): (200, []),
+        ("GET", "/repos/drc-dot-nz/paper-archives/contents/.github/workflows?ref=main"): (
+            200,
+            [],
+        ),
+        ("GET", "/repos/drc-dot-nz/paper-archives/contents/.github/CODEOWNERS?ref=main"): (
+            200,
+            {"content": encoded(codeowners)},
+        ),
+    }
+    with MockGitHubServer(routes) as server:
+        code, result = run_preflight(server.url)
+    assert code == 0
+    assert "No CODEOWNERS coverage found for workflow or local action paths." in result[
+        "warnings"
+    ]
 ```
 
 Then implement the minimal API wiring:
@@ -1180,6 +1271,29 @@ def decode_content(data: dict[str, Any]) -> str:
     return base64.b64decode(content).decode()
 
 
+def codeowners_covers_path(pattern: str, path: str) -> bool:
+    pattern = pattern.strip()
+    if not pattern or pattern.startswith("#"):
+        return False
+    pattern = pattern.split()[0]
+    if pattern.startswith("/"):
+        pattern = pattern[1:]
+    if pattern.endswith("/"):
+        pattern = f"{pattern}**"
+    if pattern == "*":
+        return True
+    return PurePosixPath(path).match(pattern)
+
+
+def codeowners_has_required_coverage(text: str, required_paths: list[str]) -> bool:
+    patterns = [line.split("#", 1)[0].strip() for line in text.splitlines()]
+    patterns = [pattern for pattern in patterns if pattern]
+    for required_path in required_paths:
+        if not any(codeowners_covers_path(pattern, required_path) for pattern in patterns):
+            return False
+    return True
+
+
 def check_codeowners(
     *,
     api_base_url: str,
@@ -1188,6 +1302,7 @@ def check_codeowners(
     owner: str,
     repo: str,
     branch: str,
+    required_paths: list[str],
 ) -> CheckResult:
     for path in [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]:
         status, data, _headers = request_json(
@@ -1198,8 +1313,10 @@ def check_codeowners(
             path=f"/repos/{owner}/{repo}/contents/{path}?ref={branch}",
             purpose=f"CODEOWNERS lookup {path}",
         )
-        if status == 200 and decode_content(data).strip():
-            return CheckResult(errors=[], warnings=[])
+        if status == 200:
+            text = decode_content(data)
+            if codeowners_has_required_coverage(text, required_paths):
+                return CheckResult(errors=[], warnings=[])
     return CheckResult(
         errors=[],
         warnings=["No CODEOWNERS coverage found for workflow or local action paths."],
@@ -1207,7 +1324,17 @@ def check_codeowners(
 ```
 
 Call `check_codeowners` after the registration token probe when repo metadata
-has a `default_branch`.
+has a `default_branch`, passing:
+
+```python
+required_codeowner_paths = [
+    ".github/workflows/example.yml",
+    ".github/actions/example/action.yml",
+]
+```
+
+This minimal list verifies workflow and local-action coverage in Sprint 1.
+Later sprints can derive exact paths from the fetched workflow/action tree.
 
 - [ ] **Step 6: Run all tests**
 
@@ -1424,6 +1551,12 @@ def check_branch_rules(
             errors=[],
             warnings=[f"No active branch rules returned for default branch {branch}."],
         )
+    rule_types = {str(rule.get("type", "")) for rule in data if isinstance(rule, dict)}
+    if "pull_request" not in rule_types:
+        return CheckResult(
+            errors=[],
+            warnings=[f"No pull request review rule returned for default branch {branch}."],
+        )
     return CheckResult(errors=[], warnings=[])
 
 
@@ -1519,7 +1652,6 @@ git commit -m "Complete API-backed preflight checks"
 **Files:**
 - Create: `docs/preflight.md`
 - Create: `tests/test_preflight_playbook.py`
-- Modify: `roles/preflight/tasks/main.yml`
 
 - [ ] **Step 1: Add playbook integration test**
 
@@ -1585,6 +1717,10 @@ Warnings:
 
 Warnings do not block solo-developer mode because the repository owner can
 bypass review and CODEOWNERS controls.
+
+The inventory default `github_pat_expires_on: "1970-01-01"` is a placeholder
+that intentionally fails. Set it to the real fine-grained PAT expiration date
+before running preflight against GitHub.
 ````
 
 - [ ] **Step 4: Run full local verification**
