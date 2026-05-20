@@ -112,6 +112,28 @@ elif [[ "$mode" == "fail-destroy" ]]; then
     config) exit 2 ;;
     *) echo "unexpected qm $*" >&2; exit 42 ;;
   esac
+elif [[ "$mode" == "fail-import" ]]; then
+  state="${FAKE_QM_STATE:?}"
+  case "$1" in
+    status)
+      if [[ -f "$state" ]]; then exit 0; fi
+      exit 2
+      ;;
+    create) printf 'created\n' > "$state" ;;
+    set)
+      if [[ ! -f "$state" ]]; then exit 44; fi
+      if [[ "$*" == *"--scsi0"* ]]; then exit 55; fi
+      ;;
+    destroy) rm -f "$state" ;;
+    config)
+      if [[ -f "$state" ]] && [[ "$(cat "$state")" == "template" ]]; then
+        printf 'name: ubuntu-2404-cloud\ntemplate: 1\n'
+        exit 0
+      fi
+      exit 2
+      ;;
+    *) echo "unexpected qm $*" >&2; exit 42 ;;
+  esac
 else
   echo "unsupported fake qm mode $mode" >&2
   exit 43
@@ -245,4 +267,19 @@ def test_failed_partial_cleanup_reports_destroy_failure(tmp_path: Path) -> None:
     assert "rc=77" in proc.stdout
     assert "stdout=destroy stdout" in proc.stdout
     assert "stderr=destroy stderr" in proc.stdout
+    assert not (tmp_path / "cache" / "image.img").exists()
+
+
+def test_failed_template_creation_destroys_partial_vm(tmp_path: Path) -> None:
+    server, extra_vars = image_server_and_vars(tmp_path)
+    with server:
+        proc = run_template_playbook(
+            tmp_path=tmp_path,
+            mode="fail-import",
+            extra_vars=extra_vars,
+        )
+    assert proc.returncode != 0
+    log = (tmp_path / "qm.log").read_text()
+    assert "destroy 9000 --purge" in log
+    assert "Partial VM cleanup was completed" in proc.stdout
     assert not (tmp_path / "cache" / "image.img").exists()
