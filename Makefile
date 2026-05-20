@@ -29,7 +29,7 @@ lint: setup ## Run YAML, Ansible, and Python lint
 	$(ACTIVATE) && ty check
 
 syntax: setup ## Run Ansible playbook syntax checks
-	$(ACTIVATE) && set -e; for playbook in playbooks/*.yml; do \
+	set -e; $(ACTIVATE); for playbook in playbooks/*.yml; do \
 		ansible-playbook --syntax-check "$$playbook"; \
 	done
 
