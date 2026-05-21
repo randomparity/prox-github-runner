@@ -112,6 +112,25 @@ elif [[ "$mode" == "create-success" ]]; then
       ;;
     *) echo "unexpected qm $*" >&2; exit 42 ;;
   esac
+elif [[ "$mode" == "create-collision" ]]; then
+  state="${FAKE_QM_STATE:?}"
+  case "$1" in
+    status)
+      if [[ -f "$state" ]]; then exit 0; fi
+      exit 2
+      ;;
+    create)
+      printf 'collision\n' > "$state"
+      echo "VMID appeared during create" >&2
+      exit 66
+      ;;
+    destroy)
+      echo "destroy must not be called for unowned VM shell" >&2
+      exit 99
+      ;;
+    config) exit 2 ;;
+    *) echo "unexpected qm $*" >&2; exit 42 ;;
+  esac
 elif [[ "$mode" == "fail-destroy" ]]; then
   state="${FAKE_QM_STATE:?}"
   case "$1" in
@@ -131,6 +150,31 @@ elif [[ "$mode" == "fail-destroy" ]]; then
       echo "destroy stdout"
       echo "destroy stderr" >&2
       exit 77
+      ;;
+    config) exit 2 ;;
+    *) echo "unexpected qm $*" >&2; exit 42 ;;
+  esac
+elif [[ "$mode" == "partial-status-error" ]]; then
+  state="${FAKE_QM_STATE:?}"
+  case "$1" in
+    status)
+      if [[ -f "$state" ]]; then
+        echo "permission denied" >&2
+        exit 13
+      fi
+      exit 2
+      ;;
+    create) printf 'created\n' > "$state" ;;
+    set)
+      if [[ ! -f "$state" ]]; then exit 44; fi
+      if [[ "$*" == *"--scsi0"* ]]; then
+        echo "import failed" >&2
+        exit 55
+      fi
+      ;;
+    destroy)
+      echo "destroy must not be called after partial status error" >&2
+      exit 99
       ;;
     config) exit 2 ;;
     *) echo "unexpected qm $*" >&2; exit 42 ;;
@@ -448,6 +492,36 @@ def test_failed_template_creation_destroys_partial_vm(tmp_path: Path) -> None:
     assert not (tmp_path / "cache" / "image.img").exists()
 
 
+def test_create_collision_does_not_destroy_unowned_vm(tmp_path: Path) -> None:
+    server, extra_vars = image_server_and_vars(tmp_path)
+    with server:
+        proc = run_template_playbook(
+            tmp_path=tmp_path,
+            mode="create-collision",
+            extra_vars=extra_vars,
+        )
+    assert proc.returncode != 0
+    assert "This run did not create the VM shell" in proc.stdout
+    log = (tmp_path / "qm.log").read_text()
+    assert "create 9000" in log
+    assert "destroy 9000 --purge" not in log
+
+
+def test_partial_status_error_fails_without_destroy(tmp_path: Path) -> None:
+    server, extra_vars = image_server_and_vars(tmp_path)
+    with server:
+        proc = run_template_playbook(
+            tmp_path=tmp_path,
+            mode="partial-status-error",
+            extra_vars=extra_vars,
+        )
+    assert proc.returncode != 0
+    assert "Could not determine whether partial VMID 9000 exists for cleanup" in proc.stdout
+    assert "rc=13" in proc.stdout
+    assert "permission denied" in proc.stdout
+    assert "destroy 9000 --purge" not in (tmp_path / "qm.log").read_text()
+
+
 def test_status_error_fails_before_download_or_create(tmp_path: Path) -> None:
     proc = run_template_playbook(tmp_path=tmp_path, mode="status-error")
     assert proc.returncode != 0
@@ -481,6 +555,39 @@ def test_vmid_below_100_is_rejected(tmp_path: Path) -> None:
     assert "Missing or invalid Proxmox template configuration" in proc.stdout
 
 
+def test_vmid_float_string_is_rejected_before_qm_call(tmp_path: Path) -> None:
+    proc = run_template_playbook(
+        tmp_path=tmp_path,
+        mode="existing-template",
+        extra_vars={"proxmox_template_vmid": "9000.5"},
+    )
+    assert proc.returncode != 0
+    assert "Missing or invalid Proxmox template configuration" in proc.stdout
+    assert not (tmp_path / "qm.log").exists()
+
+
+def test_vmid_float_is_rejected_before_qm_call(tmp_path: Path) -> None:
+    proc = run_template_playbook(
+        tmp_path=tmp_path,
+        mode="existing-template",
+        extra_vars={"proxmox_template_vmid": 9000.5},
+    )
+    assert proc.returncode != 0
+    assert "Missing or invalid Proxmox template configuration" in proc.stdout
+    assert not (tmp_path / "qm.log").exists()
+
+
+def test_vmid_above_proxmox_range_is_rejected_before_qm_call(tmp_path: Path) -> None:
+    proc = run_template_playbook(
+        tmp_path=tmp_path,
+        mode="existing-template",
+        extra_vars={"proxmox_template_vmid": 1000000000},
+    )
+    assert proc.returncode != 0
+    assert "Missing or invalid Proxmox template configuration" in proc.stdout
+    assert not (tmp_path / "qm.log").exists()
+
+
 def test_cloud_image_filename_cannot_include_slash(tmp_path: Path) -> None:
     proc = run_template_playbook(
         tmp_path=tmp_path,
@@ -499,6 +606,28 @@ def test_cloud_image_filename_cannot_include_dotdot(tmp_path: Path) -> None:
     )
     assert proc.returncode != 0
     assert "Missing or invalid Proxmox template configuration" in proc.stdout
+
+
+def test_cloud_image_filename_cannot_be_dot(tmp_path: Path) -> None:
+    proc = run_template_playbook(
+        tmp_path=tmp_path,
+        mode="existing-template",
+        extra_vars={"proxmox_template_cloud_image_filename": "."},
+    )
+    assert proc.returncode != 0
+    assert "Missing or invalid Proxmox template configuration" in proc.stdout
+    assert not (tmp_path / "qm.log").exists()
+
+
+def test_cloud_image_filename_cannot_be_whitespace(tmp_path: Path) -> None:
+    proc = run_template_playbook(
+        tmp_path=tmp_path,
+        mode="existing-template",
+        extra_vars={"proxmox_template_cloud_image_filename": "   "},
+    )
+    assert proc.returncode != 0
+    assert "Missing or invalid Proxmox template configuration" in proc.stdout
+    assert not (tmp_path / "qm.log").exists()
 
 
 def test_cloud_image_download_failure_names_url_and_checksum(tmp_path: Path) -> None:

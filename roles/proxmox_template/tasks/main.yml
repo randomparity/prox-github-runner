@@ -2,7 +2,9 @@
 - name: Validate Proxmox template variables
   ansible.builtin.assert:
     that:
+      - (proxmox_template_vmid | string) is match('^[0-9]+$')
       - proxmox_template_vmid | int >= 100
+      - proxmox_template_vmid | int <= 999999999
       - proxmox_template_name | length > 0
       - proxmox_template_storage | length > 0
       - proxmox_template_bridge | length > 0
@@ -10,6 +12,7 @@
       - proxmox_template_cloud_image_filename | length > 0
       - proxmox_template_cloud_image_filename is not search('/')
       - proxmox_template_cloud_image_filename is not search('\\.\\.')
+      - proxmox_template_cloud_image_filename is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')
       - proxmox_template_cloud_image_checksum is match('^sha256:[a-f0-9]{64}$')
       - proxmox_template_memory_mb | int >= 1024
       - proxmox_template_cores | int >= 1
@@ -159,6 +162,10 @@
           ansible.builtin.set_fact:
             proxmox_template_creation_phase: qm
 
+        - name: Record that this run does not yet own a VM shell
+          ansible.builtin.set_fact:
+            proxmox_template_owns_vm_shell: false
+
         - name: Create Proxmox template VM shell
           ansible.builtin.command:
             argv:
@@ -178,6 +185,10 @@
               - --ostype
               - "{{ proxmox_template_os_type }}"
           changed_when: true
+
+        - name: Record that this run owns the VM shell
+          ansible.builtin.set_fact:
+            proxmox_template_owns_vm_shell: true
 
         - name: Import Ubuntu cloud image disk
           ansible.builtin.command:
@@ -226,6 +237,16 @@
               proxmox_template_cloud_image_checksum }}.
           when: proxmox_template_creation_phase | default('') == 'download'
 
+        - name: Report template creation failure before VM shell ownership
+          ansible.builtin.fail:
+            msg: >-
+              Template creation failed for VMID {{ proxmox_template_vmid }}.
+              This run did not create the VM shell, so no partial VM cleanup
+              was attempted.
+          when:
+            - proxmox_template_creation_phase | default('') != 'download'
+            - not (proxmox_template_owns_vm_shell | default(false) | bool)
+
         - name: Check for partial template VM after failure
           ansible.builtin.command:
             argv:
@@ -235,7 +256,26 @@
           register: proxmox_template_partial_status
           changed_when: false
           failed_when: false
-          when: proxmox_template_creation_phase | default('') != 'download'
+          when:
+            - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_owns_vm_shell | default(false) | bool
+
+        - name: Fail when partial template VM status cannot be determined
+          ansible.builtin.fail:
+            msg: >-
+              Could not determine whether partial VMID {{
+              proxmox_template_vmid }} exists for cleanup.
+              qm status rc={{ proxmox_template_partial_status.rc }};
+              msg={{ proxmox_template_partial_status.msg | default('') }};
+              stdout={{
+              proxmox_template_partial_status.stdout | default('') }};
+              stderr={{
+              proxmox_template_partial_status.stderr | default('') }}.
+          when:
+            - proxmox_template_owns_vm_shell | default(false) | bool
+            - >-
+              proxmox_template_partial_status.rc not in [0, 2] or
+              (proxmox_template_partial_status.msg | default('')) == 'Error executing command.'
 
         - name: Destroy partial template VM after failure
           ansible.builtin.command:
@@ -249,6 +289,7 @@
           failed_when: false
           when:
             - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_owns_vm_shell | default(false) | bool
             - proxmox_template_partial_status.rc == 0
 
         - name: Fail when partial template cleanup fails
@@ -260,6 +301,7 @@
               stderr={{ proxmox_template_destroy_result.stderr | default('') }}.
           when:
             - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_owns_vm_shell | default(false) | bool
             - proxmox_template_partial_status.rc == 0
             - proxmox_template_destroy_result.rc != 0
 
@@ -270,7 +312,9 @@
               Partial VM cleanup was completed.
           when:
             - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_owns_vm_shell | default(false) | bool
             - proxmox_template_partial_status.rc == 0
+            - proxmox_template_destroy_result.rc == 0
 
         - name: Report template creation failure without cleanup
           ansible.builtin.fail:
@@ -279,7 +323,9 @@
               No partial VM was present for cleanup.
           when:
             - proxmox_template_creation_phase | default('') != 'download'
-            - proxmox_template_partial_status.rc != 0
+            - proxmox_template_owns_vm_shell | default(false) | bool
+            - proxmox_template_partial_status.rc == 2
+            - (proxmox_template_partial_status.msg | default('')) != 'Error executing command.'
 
       always:
         - name: Remove downloaded Ubuntu cloud image
