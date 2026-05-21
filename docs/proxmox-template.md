@@ -37,6 +37,14 @@ A second concurrent run fails before touching Proxmox. If a prior run was
 interrupted and no Ansible process is active, remove the stale lock directory
 manually and rerun the playbook.
 
+Because the lock contains an `owner` file, remove a stale lock non-recursively
+only after confirming no Ansible process is active:
+
+```bash
+rm /var/lock/prox-github-runner-template-<vmid>.lock/owner
+rmdir /var/lock/prox-github-runner-template-<vmid>.lock
+```
+
 The Ubuntu image URL tracks `noble/current/`, while the SHA256 checksum remains
 pinned in `inventory/group_vars/proxmox/vars.yml`. This avoids dated snapshot
 URL rot without silently accepting a changed base image.
