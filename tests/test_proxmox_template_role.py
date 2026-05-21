@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -188,6 +189,55 @@ def run_template_playbook(
     )
 
 
+def write_ansible_only_path(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ansible_playbook = shutil.which("ansible-playbook")
+    assert ansible_playbook is not None, "ansible-playbook must be available"
+    (bin_dir / "ansible-playbook").symlink_to(ansible_playbook)
+    (bin_dir / "python").symlink_to(sys.executable)
+    (bin_dir / "python3").symlink_to(sys.executable)
+    return bin_dir
+
+
+def path_without_qm(bin_dir: Path) -> str:
+    entries = [str(bin_dir)]
+    for entry in os.environ["PATH"].split(os.pathsep):
+        if entry and shutil.which("qm", path=entry) is None:
+            entries.append(entry)
+    return os.pathsep.join(entries)
+
+
+def run_template_playbook_without_qm(
+    *,
+    tmp_path: Path,
+    extra_vars: dict[str, object] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    inventory = tmp_path / "hosts.yml"
+    write_inventory(inventory)
+    merged_vars = base_extra_vars(tmp_path)
+    if extra_vars:
+        merged_vars.update(extra_vars)
+    env = {
+        **os.environ,
+        "PATH": path_without_qm(write_ansible_only_path(tmp_path)),
+    }
+    return subprocess.run(
+        [
+            "ansible-playbook",
+            "-i",
+            str(inventory),
+            "playbooks/provision-template.yml",
+            "-e",
+            json.dumps(merged_vars),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+
 def test_existing_template_passes_without_create_commands(tmp_path: Path) -> None:
     proc = run_template_playbook(tmp_path=tmp_path, mode="existing-template")
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -304,6 +354,18 @@ def test_status_error_fails_before_download_or_create(tmp_path: Path) -> None:
     assert "create 9000" not in log
 
 
+def test_missing_qm_command_fails_before_download_or_create(tmp_path: Path) -> None:
+    proc = run_template_playbook_without_qm(
+        tmp_path=tmp_path,
+        extra_vars={"proxmox_template_cloud_image_url": "http://127.0.0.1:9/image.img"},
+    )
+    assert proc.returncode != 0
+    assert "Could not determine whether VMID 9000 exists" in proc.stdout
+    assert "rc=2" in proc.stdout
+    assert "msg=Error executing command." in proc.stdout
+    assert not (tmp_path / "cache").exists()
+
+
 def test_vmid_below_100_is_rejected(tmp_path: Path) -> None:
     proc = run_template_playbook(
         tmp_path=tmp_path,
@@ -314,11 +376,21 @@ def test_vmid_below_100_is_rejected(tmp_path: Path) -> None:
     assert "Missing or invalid Proxmox template configuration" in proc.stdout
 
 
-def test_cloud_image_filename_cannot_escape_cache_dir(tmp_path: Path) -> None:
+def test_cloud_image_filename_cannot_include_slash(tmp_path: Path) -> None:
     proc = run_template_playbook(
         tmp_path=tmp_path,
         mode="existing-template",
-        extra_vars={"proxmox_template_cloud_image_filename": "../image.img"},
+        extra_vars={"proxmox_template_cloud_image_filename": "nested/image.img"},
+    )
+    assert proc.returncode != 0
+    assert "Missing or invalid Proxmox template configuration" in proc.stdout
+
+
+def test_cloud_image_filename_cannot_include_dotdot(tmp_path: Path) -> None:
+    proc = run_template_playbook(
+        tmp_path=tmp_path,
+        mode="existing-template",
+        extra_vars={"proxmox_template_cloud_image_filename": "image..img"},
     )
     assert proc.returncode != 0
     assert "Missing or invalid Proxmox template configuration" in proc.stdout

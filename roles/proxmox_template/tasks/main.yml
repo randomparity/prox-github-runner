@@ -30,9 +30,13 @@
     msg: >-
       Could not determine whether VMID {{ proxmox_template_vmid }} exists.
       qm status rc={{ proxmox_template_status.rc }};
+      msg={{ proxmox_template_status.msg | default('') }};
       stdout={{ proxmox_template_status.stdout | default('') }};
       stderr={{ proxmox_template_status.stderr | default('') }}.
-  when: proxmox_template_status.rc not in [0, 2]
+  when:
+    - >-
+      proxmox_template_status.rc not in [0, 2] or
+      (proxmox_template_status.msg | default('')) == 'Error executing command.'
 
 - name: Record template existence
   ansible.builtin.set_fact:
