@@ -36,6 +36,7 @@ def base_extra_vars(tmp_path: Path) -> dict[str, object]:
         "proxmox_storage": "local-lvm",
         "proxmox_template_bridge": "vmbr0",
         "proxmox_template_vlan": None,
+        "proxmox_template_lock_dir": str(tmp_path / "template.lock"),
         "proxmox_template_image_cache_dir": str(tmp_path / "cache"),
         "proxmox_template_cloud_image_url": "https://example.invalid/image.img",
         "proxmox_template_cloud_image_filename": "image.img",
@@ -153,6 +154,27 @@ fi
     return qm_path
 
 
+def write_fake_pveversion(tmp_path: Path) -> Path:
+    pveversion_path = tmp_path / "pveversion"
+    pveversion_path.write_text(
+        r"""#!/usr/bin/env bash
+set -euo pipefail
+mode="${FAKE_PVEVERSION_MODE:-pve8}"
+
+if [[ "$mode" == "pve8" ]]; then
+  printf 'proxmox-ve: 8.2.0\n'
+elif [[ "$mode" == "pve7" ]]; then
+  printf 'proxmox-ve: 7.4.0\n'
+else
+  echo "pveversion failed" >&2
+  exit 12
+fi
+"""
+    )
+    pveversion_path.chmod(pveversion_path.stat().st_mode | stat.S_IXUSR)
+    return pveversion_path
+
+
 def run_template_playbook(
     *,
     tmp_path: Path,
@@ -163,6 +185,7 @@ def run_template_playbook(
     log = tmp_path / "qm.log"
     write_inventory(inventory)
     write_fake_qm(tmp_path, mode)
+    write_fake_pveversion(tmp_path)
     merged_vars = base_extra_vars(tmp_path)
     if extra_vars:
         merged_vars.update(extra_vars)
@@ -197,6 +220,7 @@ def write_ansible_only_path(tmp_path: Path) -> Path:
     (bin_dir / "ansible-playbook").symlink_to(ansible_playbook)
     (bin_dir / "python").symlink_to(sys.executable)
     (bin_dir / "python3").symlink_to(sys.executable)
+    write_fake_pveversion(bin_dir)
     return bin_dir
 
 
@@ -221,6 +245,7 @@ def run_template_playbook_without_qm(
     env = {
         **os.environ,
         "PATH": path_without_qm(write_ansible_only_path(tmp_path)),
+        "FAKE_PVEVERSION_MODE": "pve8",
     }
     return subprocess.run(
         [
@@ -248,6 +273,48 @@ def test_existing_non_template_vm_fails(tmp_path: Path) -> None:
     proc = run_template_playbook(tmp_path=tmp_path, mode="existing-vm")
     assert proc.returncode != 0
     assert "exists but is not a template" in proc.stdout
+
+
+def test_pve_7_is_rejected_before_status_check(tmp_path: Path) -> None:
+    inventory = tmp_path / "hosts.yml"
+    log = tmp_path / "qm.log"
+    write_inventory(inventory)
+    write_fake_qm(tmp_path, "existing-template")
+    write_fake_pveversion(tmp_path)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "FAKE_QM_MODE": "existing-template",
+        "FAKE_QM_LOG": str(log),
+        "FAKE_QM_STATE": str(tmp_path / "qm.state"),
+        "FAKE_PVEVERSION_MODE": "pve7",
+    }
+    proc = subprocess.run(
+        [
+            "ansible-playbook",
+            "-i",
+            str(inventory),
+            "playbooks/provision-template.yml",
+            "-e",
+            json.dumps(base_extra_vars(tmp_path)),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    assert proc.returncode != 0
+    assert "Proxmox VE 8 is required" in proc.stdout
+    assert not log.exists()
+
+
+def test_template_lock_contention_fails_before_status_check(tmp_path: Path) -> None:
+    lock_dir = tmp_path / "template.lock"
+    lock_dir.mkdir()
+    proc = run_template_playbook(tmp_path=tmp_path, mode="existing-template")
+    assert proc.returncode != 0
+    assert "Could not acquire Proxmox template lock" in proc.stdout
+    assert not (tmp_path / "qm.log").exists()
 
 
 class QuietHandler(SimpleHTTPRequestHandler):

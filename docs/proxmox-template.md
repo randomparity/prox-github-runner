@@ -20,6 +20,23 @@ The playbook is intentionally narrow:
 - It destroys a partial VM if template creation fails after `qm create`.
 - It reports a separate hard failure if partial VM cleanup itself fails.
 
+## Proxmox Requirements
+
+The role requires Proxmox VE 8.x because it imports the cloud image with
+`qm set --scsi0 <storage>:0,import-from=<path>`. The playbook checks
+`pveversion -v` before downloading the image or mutating a VM.
+
+The role also acquires a host-side lock directory before checking or creating
+the template:
+
+```text
+/var/lock/prox-github-runner-template-<vmid>.lock
+```
+
+A second concurrent run fails before touching Proxmox. If a prior run was
+interrupted and no Ansible process is active, remove the stale lock directory
+manually and rerun the playbook.
+
 The Ubuntu image URL tracks `noble/current/`, while the SHA256 checksum remains
 pinned in `inventory/group_vars/proxmox/vars.yml`. This avoids dated snapshot
 URL rot without silently accepting a changed base image.
