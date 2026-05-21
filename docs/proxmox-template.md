@@ -20,6 +20,19 @@ The playbook is intentionally narrow:
 - It destroys a partial VM if template creation fails after `qm create`.
 - It reports a separate hard failure if partial VM cleanup itself fails.
 
+## Recovering From A Stuck Partial VM
+
+If cleanup fails, the next run will stop because the VMID exists but is not a
+template. Recover manually on the Proxmox host:
+
+```bash
+qm unlock <vmid>
+qm destroy <vmid> --purge --skiplock
+```
+
+Use the configured `proxmox_template_vmid`. Only run these commands after
+confirming the VMID is the failed template VM and not a real workload.
+
 ## Proxmox Requirements
 
 The role requires Proxmox VE 8.x because it imports the cloud image with

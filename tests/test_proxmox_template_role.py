@@ -499,3 +499,12 @@ def test_cloud_image_filename_cannot_include_dotdot(tmp_path: Path) -> None:
     )
     assert proc.returncode != 0
     assert "Missing or invalid Proxmox template configuration" in proc.stdout
+
+
+def test_cloud_image_download_failure_names_url_and_checksum(tmp_path: Path) -> None:
+    proc = run_template_playbook(tmp_path=tmp_path, mode="create-success")
+    assert proc.returncode != 0
+    assert "Ubuntu cloud image download failed" in proc.stdout
+    assert "proxmox_template_cloud_image_url" in proc.stdout
+    assert "proxmox_template_cloud_image_checksum" in proc.stdout
+    assert "create 9000" not in (tmp_path / "qm.log").read_text()

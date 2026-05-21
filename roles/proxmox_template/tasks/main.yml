@@ -144,12 +144,20 @@
             state: directory
             mode: "0755"
 
+        - name: Record template creation phase before image download
+          ansible.builtin.set_fact:
+            proxmox_template_creation_phase: download
+
         - name: Download Ubuntu cloud image
           ansible.builtin.get_url:
             url: "{{ proxmox_template_cloud_image_url }}"
             dest: "{{ proxmox_template_image_path }}"
             checksum: "{{ proxmox_template_cloud_image_checksum }}"
             mode: "0644"
+
+        - name: Record template creation phase before VM mutation
+          ansible.builtin.set_fact:
+            proxmox_template_creation_phase: qm
 
         - name: Create Proxmox template VM shell
           ansible.builtin.command:
@@ -208,6 +216,16 @@
           changed_when: true
 
       rescue:
+        - name: Report Ubuntu cloud image download failure
+          ansible.builtin.fail:
+            msg: >-
+              Ubuntu cloud image download failed before VM creation.
+              Check proxmox_template_cloud_image_url={{
+              proxmox_template_cloud_image_url }} and
+              proxmox_template_cloud_image_checksum={{
+              proxmox_template_cloud_image_checksum }}.
+          when: proxmox_template_creation_phase | default('') == 'download'
+
         - name: Check for partial template VM after failure
           ansible.builtin.command:
             argv:
@@ -217,6 +235,7 @@
           register: proxmox_template_partial_status
           changed_when: false
           failed_when: false
+          when: proxmox_template_creation_phase | default('') != 'download'
 
         - name: Destroy partial template VM after failure
           ansible.builtin.command:
@@ -228,7 +247,9 @@
           register: proxmox_template_destroy_result
           changed_when: proxmox_template_partial_status.rc == 0
           failed_when: false
-          when: proxmox_template_partial_status.rc == 0
+          when:
+            - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_partial_status.rc == 0
 
         - name: Fail when partial template cleanup fails
           ansible.builtin.fail:
@@ -238,6 +259,7 @@
               stdout={{ proxmox_template_destroy_result.stdout | default('') }};
               stderr={{ proxmox_template_destroy_result.stderr | default('') }}.
           when:
+            - proxmox_template_creation_phase | default('') != 'download'
             - proxmox_template_partial_status.rc == 0
             - proxmox_template_destroy_result.rc != 0
 
@@ -246,14 +268,18 @@
             msg: >-
               Template creation failed for VMID {{ proxmox_template_vmid }}.
               Partial VM cleanup was completed.
-          when: proxmox_template_partial_status.rc == 0
+          when:
+            - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_partial_status.rc == 0
 
         - name: Report template creation failure without cleanup
           ansible.builtin.fail:
             msg: >-
               Template creation failed for VMID {{ proxmox_template_vmid }}.
               No partial VM was present for cleanup.
-          when: proxmox_template_partial_status.rc != 0
+          when:
+            - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_partial_status.rc != 0
 
       always:
         - name: Remove downloaded Ubuntu cloud image
