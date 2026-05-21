@@ -656,6 +656,19 @@ def test_cloud_image_filename_with_trailing_newline_is_rejected_before_qm_call(
     assert not (tmp_path / "qm.log").exists()
 
 
+def test_cloud_image_checksum_with_trailing_newline_is_rejected_before_qm_call(
+    tmp_path: Path,
+) -> None:
+    proc = run_template_playbook(
+        tmp_path=tmp_path,
+        mode="existing-template",
+        extra_vars={"proxmox_template_cloud_image_checksum": "sha256:" + "a" * 64 + "\n"},
+    )
+    assert proc.returncode != 0
+    assert "Missing or invalid Proxmox template configuration" in proc.stdout
+    assert not (tmp_path / "qm.log").exists()
+
+
 def test_cloud_image_download_failure_names_url_and_checksum(tmp_path: Path) -> None:
     proc = run_template_playbook(tmp_path=tmp_path, mode="create-success")
     assert proc.returncode != 0

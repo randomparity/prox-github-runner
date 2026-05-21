@@ -13,7 +13,7 @@
       - proxmox_template_cloud_image_filename is not search('/')
       - proxmox_template_cloud_image_filename is not search('\\.\\.')
       - proxmox_template_cloud_image_filename is match('\\A[A-Za-z0-9][A-Za-z0-9._-]*\\Z')
-      - proxmox_template_cloud_image_checksum is match('^sha256:[a-f0-9]{64}$')
+      - proxmox_template_cloud_image_checksum is match('\\Asha256:[a-f0-9]{64}\\Z')
       - proxmox_template_memory_mb | int >= 1024
       - proxmox_template_cores | int >= 1
     fail_msg: "Missing or invalid Proxmox template configuration."
