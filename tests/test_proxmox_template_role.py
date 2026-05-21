@@ -75,6 +75,19 @@ elif [[ "$mode" == "status-error" ]]; then
       ;;
     *) echo "unexpected qm $*" >&2; exit 42 ;;
   esac
+elif [[ "$mode" == "replace-lock-during-status" ]]; then
+  case "$1" in
+    status)
+      lock_dir="${FAKE_LOCK_DIR:?}"
+      rm -f "$lock_dir/owner"
+      rmdir "$lock_dir"
+      mkdir "$lock_dir"
+      printf 'other-run\n' > "$lock_dir/owner"
+      exit 0
+      ;;
+    config) printf 'name: ubuntu-2404-cloud\ntemplate: 1\n' ;;
+    *) echo "unexpected qm $*" >&2; exit 42 ;;
+  esac
 elif [[ "$mode" == "create-success" ]]; then
   state="${FAKE_QM_STATE:?}"
   case "$1" in
@@ -161,6 +174,11 @@ def write_fake_pveversion(tmp_path: Path) -> Path:
 set -euo pipefail
 mode="${FAKE_PVEVERSION_MODE:-pve8}"
 
+if [[ "$#" -ne 1 ]] || [[ "$1" != "-v" ]]; then
+  echo "unexpected pveversion $*" >&2
+  exit 14
+fi
+
 if [[ "$mode" == "pve8" ]]; then
   printf 'proxmox-ve: 8.2.0\n'
 elif [[ "$mode" == "pve7" ]]; then
@@ -195,6 +213,8 @@ def run_template_playbook(
         "FAKE_QM_MODE": mode,
         "FAKE_QM_LOG": str(log),
         "FAKE_QM_STATE": str(tmp_path / "qm.state"),
+        "FAKE_LOCK_DIR": str(merged_vars["proxmox_template_lock_dir"]),
+        "FAKE_PVEVERSION_MODE": "pve8",
     }
     return subprocess.run(
         [
@@ -269,6 +289,15 @@ def test_existing_template_passes_without_create_commands(tmp_path: Path) -> Non
     assert "create" not in (tmp_path / "qm.log").read_text()
 
 
+def test_run_template_playbook_forces_pve_8_mode(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("FAKE_PVEVERSION_MODE", "pve7")
+    proc = run_template_playbook(tmp_path=tmp_path, mode="existing-template")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
 def test_existing_non_template_vm_fails(tmp_path: Path) -> None:
     proc = run_template_playbook(tmp_path=tmp_path, mode="existing-vm")
     assert proc.returncode != 0
@@ -315,6 +344,15 @@ def test_template_lock_contention_fails_before_status_check(tmp_path: Path) -> N
     assert proc.returncode != 0
     assert "Could not acquire Proxmox template lock" in proc.stdout
     assert not (tmp_path / "qm.log").exists()
+    assert lock_dir.exists()
+
+
+def test_template_lock_release_preserves_lock_replaced_by_other_run(tmp_path: Path) -> None:
+    lock_dir = tmp_path / "template.lock"
+    proc = run_template_playbook(tmp_path=tmp_path, mode="replace-lock-during-status")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert lock_dir.exists()
+    assert (lock_dir / "owner").read_text() == "other-run\n"
 
 
 class QuietHandler(SimpleHTTPRequestHandler):

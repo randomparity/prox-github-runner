@@ -42,11 +42,28 @@
       --scsi0 storage:0,import-from=...
       pveversion output: {{ proxmox_template_pveversion.stdout | default('') }}
 
+- name: Generate Proxmox template lock owner token
+  ansible.builtin.set_fact:
+    proxmox_template_lock_owner: >-
+      {{ inventory_hostname }}:{{ proxmox_template_vmid }}:{{ 999999999999 | random }}
+
 - name: Acquire Proxmox template lock
   ansible.builtin.command:
     argv:
-      - mkdir
+      - sh
+      - -c
+      - |
+        set -eu
+        lock_dir=$1
+        owner=$2
+        owner_file="$lock_dir/owner"
+        mkdir "$lock_dir"
+        trap 'rm -f "$owner_file"; rmdir "$lock_dir"' EXIT
+        printf '%s\n' "$owner" > "$owner_file"
+        trap - EXIT
+      - sh
       - "{{ proxmox_template_lock_dir }}"
+      - "{{ proxmox_template_lock_owner }}"
   register: proxmox_template_lock
   changed_when: proxmox_template_lock.rc == 0
   failed_when: false
@@ -264,6 +281,24 @@
 
   always:
     - name: Release Proxmox template lock
-      ansible.builtin.file:
-        path: "{{ proxmox_template_lock_dir }}"
-        state: absent
+      ansible.builtin.command:
+        argv:
+          - sh
+          - -c
+          - |
+            set -eu
+            lock_dir=$1
+            owner=$2
+            owner_file="$lock_dir/owner"
+            if ! [ -f "$owner_file" ]; then
+              exit 0
+            fi
+            if [ "$(cat "$owner_file")" != "$owner" ]; then
+              exit 0
+            fi
+            rm "$owner_file"
+            rmdir "$lock_dir"
+          - sh
+          - "{{ proxmox_template_lock_dir }}"
+          - "{{ proxmox_template_lock_owner }}"
+      changed_when: false
