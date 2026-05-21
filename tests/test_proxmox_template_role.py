@@ -566,6 +566,19 @@ def test_vmid_float_string_is_rejected_before_qm_call(tmp_path: Path) -> None:
     assert not (tmp_path / "qm.log").exists()
 
 
+def test_vmid_with_trailing_newline_is_rejected_before_qm_call(
+    tmp_path: Path,
+) -> None:
+    proc = run_template_playbook(
+        tmp_path=tmp_path,
+        mode="existing-template",
+        extra_vars={"proxmox_template_vmid": "9000\n"},
+    )
+    assert proc.returncode != 0
+    assert "Missing or invalid Proxmox template configuration" in proc.stdout
+    assert not (tmp_path / "qm.log").exists()
+
+
 def test_vmid_float_is_rejected_before_qm_call(tmp_path: Path) -> None:
     proc = run_template_playbook(
         tmp_path=tmp_path,
@@ -624,6 +637,19 @@ def test_cloud_image_filename_cannot_be_whitespace(tmp_path: Path) -> None:
         tmp_path=tmp_path,
         mode="existing-template",
         extra_vars={"proxmox_template_cloud_image_filename": "   "},
+    )
+    assert proc.returncode != 0
+    assert "Missing or invalid Proxmox template configuration" in proc.stdout
+    assert not (tmp_path / "qm.log").exists()
+
+
+def test_cloud_image_filename_with_trailing_newline_is_rejected_before_qm_call(
+    tmp_path: Path,
+) -> None:
+    proc = run_template_playbook(
+        tmp_path=tmp_path,
+        mode="existing-template",
+        extra_vars={"proxmox_template_cloud_image_filename": "image.img\n"},
     )
     assert proc.returncode != 0
     assert "Missing or invalid Proxmox template configuration" in proc.stdout

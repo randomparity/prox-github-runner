@@ -2,7 +2,7 @@
 - name: Validate Proxmox template variables
   ansible.builtin.assert:
     that:
-      - (proxmox_template_vmid | string) is match('^[0-9]+$')
+      - (proxmox_template_vmid | string) is match('\\A[0-9]+\\Z')
       - proxmox_template_vmid | int >= 100
       - proxmox_template_vmid | int <= 999999999
       - proxmox_template_name | length > 0
@@ -12,7 +12,7 @@
       - proxmox_template_cloud_image_filename | length > 0
       - proxmox_template_cloud_image_filename is not search('/')
       - proxmox_template_cloud_image_filename is not search('\\.\\.')
-      - proxmox_template_cloud_image_filename is match('^[A-Za-z0-9][A-Za-z0-9._-]*$')
+      - proxmox_template_cloud_image_filename is match('\\A[A-Za-z0-9][A-Za-z0-9._-]*\\Z')
       - proxmox_template_cloud_image_checksum is match('^sha256:[a-f0-9]{64}$')
       - proxmox_template_memory_mb | int >= 1024
       - proxmox_template_cores | int >= 1
