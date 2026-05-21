@@ -65,6 +65,14 @@ elif [[ "$mode" == "existing-vm" ]]; then
     config) printf 'name: ubuntu-2404-cloud\nmemory: 2048\n' ;;
     *) echo "unexpected qm $*" >&2; exit 42 ;;
   esac
+elif [[ "$mode" == "status-error" ]]; then
+  case "$1" in
+    status)
+      echo "permission denied" >&2
+      exit 13
+      ;;
+    *) echo "unexpected qm $*" >&2; exit 42 ;;
+  esac
 elif [[ "$mode" == "create-success" ]]; then
   state="${FAKE_QM_STATE:?}"
   case "$1" in
@@ -283,3 +291,34 @@ def test_failed_template_creation_destroys_partial_vm(tmp_path: Path) -> None:
     assert "destroy 9000 --purge" in log
     assert "Partial VM cleanup was completed" in proc.stdout
     assert not (tmp_path / "cache" / "image.img").exists()
+
+
+def test_status_error_fails_before_download_or_create(tmp_path: Path) -> None:
+    proc = run_template_playbook(tmp_path=tmp_path, mode="status-error")
+    assert proc.returncode != 0
+    assert "Could not determine whether VMID 9000 exists" in proc.stdout
+    assert "rc=13" in proc.stdout
+    assert "permission denied" in proc.stdout
+    log = (tmp_path / "qm.log").read_text()
+    assert "status 9000" in log
+    assert "create 9000" not in log
+
+
+def test_vmid_below_100_is_rejected(tmp_path: Path) -> None:
+    proc = run_template_playbook(
+        tmp_path=tmp_path,
+        mode="existing-template",
+        extra_vars={"proxmox_template_vmid": 99},
+    )
+    assert proc.returncode != 0
+    assert "Missing or invalid Proxmox template configuration" in proc.stdout
+
+
+def test_cloud_image_filename_cannot_escape_cache_dir(tmp_path: Path) -> None:
+    proc = run_template_playbook(
+        tmp_path=tmp_path,
+        mode="existing-template",
+        extra_vars={"proxmox_template_cloud_image_filename": "../image.img"},
+    )
+    assert proc.returncode != 0
+    assert "Missing or invalid Proxmox template configuration" in proc.stdout

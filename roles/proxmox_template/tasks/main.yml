@@ -2,12 +2,14 @@
 - name: Validate Proxmox template variables
   ansible.builtin.assert:
     that:
-      - proxmox_template_vmid | int > 0
+      - proxmox_template_vmid | int >= 100
       - proxmox_template_name | length > 0
       - proxmox_template_storage | length > 0
       - proxmox_template_bridge | length > 0
       - proxmox_template_cloud_image_url is match('^https?://')
       - proxmox_template_cloud_image_filename | length > 0
+      - proxmox_template_cloud_image_filename is not search('/')
+      - proxmox_template_cloud_image_filename is not search('\\.\\.')
       - proxmox_template_cloud_image_checksum is match('^sha256:[a-f0-9]{64}$')
       - proxmox_template_memory_mb | int >= 1024
       - proxmox_template_cores | int >= 1
@@ -22,6 +24,15 @@
   register: proxmox_template_status
   changed_when: false
   failed_when: false
+
+- name: Fail when template VMID status cannot be determined
+  ansible.builtin.fail:
+    msg: >-
+      Could not determine whether VMID {{ proxmox_template_vmid }} exists.
+      qm status rc={{ proxmox_template_status.rc }};
+      stdout={{ proxmox_template_status.stdout | default('') }};
+      stderr={{ proxmox_template_status.stderr | default('') }}.
+  when: proxmox_template_status.rc not in [0, 2]
 
 - name: Record template existence
   ansible.builtin.set_fact:
