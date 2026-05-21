@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: proxmox_template
+  author: dave
+  description: Create an Ubuntu cloud-init template VM with the Proxmox qm CLI.
+  license: MIT
+  min_ansible_version: "2.21"
+  platforms:
+    - name: GenericLinux
+      versions:
+        - all
+dependencies: []

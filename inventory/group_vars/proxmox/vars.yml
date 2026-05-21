@@ -3,5 +3,16 @@ proxmox_api_host: "192.168.20.10"
 proxmox_api_port: 8006
 proxmox_node: "pve"
 proxmox_storage: "local-lvm"
+
 proxmox_template_name: "ubuntu-2404-cloud"
 proxmox_template_vmid: 9000
+proxmox_template_memory_mb: 2048
+proxmox_template_cores: 2
+proxmox_template_bridge: "vmbr0"
+proxmox_template_vlan: null
+proxmox_template_image_cache_dir: "/tmp/prox-github-runner"
+proxmox_template_cloud_image_url: >-
+  https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+proxmox_template_cloud_image_filename: "noble-server-cloudimg-amd64.img"
+proxmox_template_cloud_image_checksum: >-
+  sha256:6e7016f2c9f4d3c00f48789eb6b9043ba2172ccc1b6b1eaf3ed1e29dd3e52bb3

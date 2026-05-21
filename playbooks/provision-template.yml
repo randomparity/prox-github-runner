@@ -1,0 +1,6 @@
+---
+- name: Ensure Ubuntu cloud-init template exists on Proxmox
+  hosts: proxmox
+  gather_facts: false
+  roles:
+    - proxmox_template

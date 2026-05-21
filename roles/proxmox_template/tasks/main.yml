@@ -1,0 +1,376 @@
+---
+- name: Validate Proxmox template variables
+  ansible.builtin.assert:
+    that:
+      - (proxmox_template_vmid | string) is match('\\A[0-9]+\\Z')
+      - proxmox_template_vmid | int >= 100
+      - proxmox_template_vmid | int <= 999999999
+      - proxmox_template_name | length > 0
+      - proxmox_template_storage | length > 0
+      - proxmox_template_bridge | length > 0
+      - proxmox_template_cloud_image_url is match('^https?://')
+      - proxmox_template_cloud_image_filename | length > 0
+      - proxmox_template_cloud_image_filename is not search('/')
+      - proxmox_template_cloud_image_filename is not search('\\.\\.')
+      - proxmox_template_cloud_image_filename is match('\\A[A-Za-z0-9][A-Za-z0-9._-]*\\Z')
+      - proxmox_template_cloud_image_checksum is match('\\Asha256:[a-f0-9]{64}\\Z')
+      - proxmox_template_memory_mb | int >= 1024
+      - proxmox_template_cores | int >= 1
+    fail_msg: "Missing or invalid Proxmox template configuration."
+
+- name: Read Proxmox VE version
+  ansible.builtin.command:
+    argv:
+      - pveversion
+      - -v
+  register: proxmox_template_pveversion
+  changed_when: false
+  failed_when: false
+
+- name: Fail when Proxmox VE version cannot be read
+  ansible.builtin.fail:
+    msg: >-
+      Could not read Proxmox VE version with pveversion -v.
+      rc={{ proxmox_template_pveversion.rc }};
+      stdout={{ proxmox_template_pveversion.stdout | default('') }};
+      stderr={{ proxmox_template_pveversion.stderr | default('') }}.
+  when: proxmox_template_pveversion.rc != 0
+
+- name: Require Proxmox VE 8 for import-from disk import
+  ansible.builtin.assert:
+    that:
+      - proxmox_template_pveversion.stdout is search('(?m)^proxmox-ve:\s*8\.')
+    fail_msg: >-
+      Proxmox VE 8 is required because this role uses qm set
+      --scsi0 storage:0,import-from=...
+      pveversion output: {{ proxmox_template_pveversion.stdout | default('') }}
+
+- name: Generate Proxmox template lock owner token
+  ansible.builtin.set_fact:
+    proxmox_template_lock_owner: >-
+      {{ inventory_hostname }}:{{ proxmox_template_vmid }}:{{ 999999999999 | random }}
+
+- name: Acquire Proxmox template lock
+  ansible.builtin.command:
+    argv:
+      - sh
+      - -c
+      - |
+        set -eu
+        lock_dir=$1
+        owner=$2
+        owner_file="$lock_dir/owner"
+        mkdir "$lock_dir"
+        trap 'rm -f "$owner_file"; rmdir "$lock_dir"' EXIT
+        printf '%s\n' "$owner" > "$owner_file"
+        trap - EXIT
+      - sh
+      - "{{ proxmox_template_lock_dir }}"
+      - "{{ proxmox_template_lock_owner }}"
+  register: proxmox_template_lock
+  changed_when: proxmox_template_lock.rc == 0
+  failed_when: false
+
+- name: Fail when Proxmox template lock is held
+  ansible.builtin.fail:
+    msg: >-
+      Could not acquire Proxmox template lock {{ proxmox_template_lock_dir }}.
+      Another template provisioning run may be active. If no run is active,
+      remove the stale lock directory manually.
+      mkdir rc={{ proxmox_template_lock.rc }};
+      stderr={{ proxmox_template_lock.stderr | default('') }}.
+  when: proxmox_template_lock.rc != 0
+
+- name: Converge Proxmox template while holding lock
+  block:
+    - name: Check whether template VMID exists
+      ansible.builtin.command:
+        argv:
+          - qm
+          - status
+          - "{{ proxmox_template_vmid | string }}"
+      register: proxmox_template_status
+      changed_when: false
+      failed_when: false
+
+    - name: Fail when template VMID status cannot be determined
+      ansible.builtin.fail:
+        msg: >-
+          Could not determine whether VMID {{ proxmox_template_vmid }} exists.
+          qm status rc={{ proxmox_template_status.rc }};
+          msg={{ proxmox_template_status.msg | default('') }};
+          stdout={{ proxmox_template_status.stdout | default('') }};
+          stderr={{ proxmox_template_status.stderr | default('') }}.
+      when:
+        - >-
+          proxmox_template_status.rc not in [0, 2] or
+          (proxmox_template_status.msg | default('')) == 'Error executing command.'
+
+    - name: Record template existence
+      ansible.builtin.set_fact:
+        proxmox_template_exists: "{{ proxmox_template_status.rc == 0 }}"
+
+    - name: Read existing template config
+      ansible.builtin.command:
+        argv:
+          - qm
+          - config
+          - "{{ proxmox_template_vmid | string }}"
+      register: proxmox_template_existing_config
+      changed_when: false
+      when: proxmox_template_exists
+
+    - name: Fail when existing VMID has a different name
+      ansible.builtin.fail:
+        msg: >-
+          VMID {{ proxmox_template_vmid }} already exists with a different name.
+          Expected {{ proxmox_template_name }}.
+      when:
+        - proxmox_template_exists
+        - >-
+          proxmox_template_existing_config.stdout is not search(
+          '(?m)^name:\s*' ~ (proxmox_template_name | regex_escape) ~ '$')
+
+    - name: Fail when existing VMID is not a template
+      ansible.builtin.fail:
+        msg: "VMID {{ proxmox_template_vmid }} exists but is not a template."
+      when:
+        - proxmox_template_exists
+        - proxmox_template_existing_config.stdout is not search('(?m)^template:\s*1$')
+
+    - name: Create Ubuntu cloud image template
+      when: not proxmox_template_exists
+      block:
+        - name: Ensure template image cache directory exists
+          ansible.builtin.file:
+            path: "{{ proxmox_template_image_cache_dir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Record template creation phase before image download
+          ansible.builtin.set_fact:
+            proxmox_template_creation_phase: download
+
+        - name: Download Ubuntu cloud image
+          ansible.builtin.get_url:
+            url: "{{ proxmox_template_cloud_image_url }}"
+            dest: "{{ proxmox_template_image_path }}"
+            checksum: "{{ proxmox_template_cloud_image_checksum }}"
+            mode: "0644"
+
+        - name: Record template creation phase before VM mutation
+          ansible.builtin.set_fact:
+            proxmox_template_creation_phase: qm
+
+        - name: Record that this run does not yet own a VM shell
+          ansible.builtin.set_fact:
+            proxmox_template_owns_vm_shell: false
+
+        - name: Create Proxmox template VM shell
+          ansible.builtin.command:
+            argv:
+              - qm
+              - create
+              - "{{ proxmox_template_vmid | string }}"
+              - --name
+              - "{{ proxmox_template_name }}"
+              - --memory
+              - "{{ proxmox_template_memory_mb | string }}"
+              - --cores
+              - "{{ proxmox_template_cores | string }}"
+              - --net0
+              - "{{ proxmox_template_net0 }}"
+              - --scsihw
+              - "{{ proxmox_template_scsi_controller }}"
+              - --ostype
+              - "{{ proxmox_template_os_type }}"
+          changed_when: true
+
+        - name: Record that this run owns the VM shell
+          ansible.builtin.set_fact:
+            proxmox_template_owns_vm_shell: true
+
+        - name: Import Ubuntu cloud image disk
+          ansible.builtin.command:
+            argv:
+              - qm
+              - set
+              - "{{ proxmox_template_vmid | string }}"
+              - --scsi0
+              - "{{ proxmox_template_storage }}:0,import-from={{ proxmox_template_image_path }}"
+          changed_when: true
+
+        - name: Configure cloud-init and guest agent
+          ansible.builtin.command:
+            argv:
+              - qm
+              - set
+              - "{{ proxmox_template_vmid | string }}"
+              - --ide2
+              - "{{ proxmox_template_storage }}:cloudinit"
+              - --boot
+              - order=scsi0
+              - --serial0
+              - socket
+              - --vga
+              - serial0
+              - --agent
+              - enabled=1
+          changed_when: true
+
+        - name: Convert VM to template
+          ansible.builtin.command:
+            argv:
+              - qm
+              - template
+              - "{{ proxmox_template_vmid | string }}"
+          changed_when: true
+
+      rescue:
+        - name: Report Ubuntu cloud image download failure
+          ansible.builtin.fail:
+            msg: >-
+              Ubuntu cloud image download failed before VM creation.
+              Check proxmox_template_cloud_image_url={{
+              proxmox_template_cloud_image_url }} and
+              proxmox_template_cloud_image_checksum={{
+              proxmox_template_cloud_image_checksum }}.
+          when: proxmox_template_creation_phase | default('') == 'download'
+
+        - name: Report template creation failure before VM shell ownership
+          ansible.builtin.fail:
+            msg: >-
+              Template creation failed for VMID {{ proxmox_template_vmid }}.
+              This run did not create the VM shell, so no partial VM cleanup
+              was attempted.
+          when:
+            - proxmox_template_creation_phase | default('') != 'download'
+            - not (proxmox_template_owns_vm_shell | default(false) | bool)
+
+        - name: Check for partial template VM after failure
+          ansible.builtin.command:
+            argv:
+              - qm
+              - status
+              - "{{ proxmox_template_vmid | string }}"
+          register: proxmox_template_partial_status
+          changed_when: false
+          failed_when: false
+          when:
+            - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_owns_vm_shell | default(false) | bool
+
+        - name: Fail when partial template VM status cannot be determined
+          ansible.builtin.fail:
+            msg: >-
+              Could not determine whether partial VMID {{
+              proxmox_template_vmid }} exists for cleanup.
+              qm status rc={{ proxmox_template_partial_status.rc }};
+              msg={{ proxmox_template_partial_status.msg | default('') }};
+              stdout={{
+              proxmox_template_partial_status.stdout | default('') }};
+              stderr={{
+              proxmox_template_partial_status.stderr | default('') }}.
+          when:
+            - proxmox_template_owns_vm_shell | default(false) | bool
+            - >-
+              proxmox_template_partial_status.rc not in [0, 2] or
+              (proxmox_template_partial_status.msg | default('')) == 'Error executing command.'
+
+        - name: Destroy partial template VM after failure
+          ansible.builtin.command:
+            argv:
+              - qm
+              - destroy
+              - "{{ proxmox_template_vmid | string }}"
+              - --purge
+          register: proxmox_template_destroy_result
+          changed_when: proxmox_template_partial_status.rc == 0
+          failed_when: false
+          when:
+            - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_owns_vm_shell | default(false) | bool
+            - proxmox_template_partial_status.rc == 0
+
+        - name: Fail when partial template cleanup fails
+          ansible.builtin.fail:
+            msg: >-
+              Partial VM cleanup failed for VMID {{ proxmox_template_vmid }}.
+              destroy rc={{ proxmox_template_destroy_result.rc }};
+              stdout={{ proxmox_template_destroy_result.stdout | default('') }};
+              stderr={{ proxmox_template_destroy_result.stderr | default('') }}.
+          when:
+            - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_owns_vm_shell | default(false) | bool
+            - proxmox_template_partial_status.rc == 0
+            - proxmox_template_destroy_result.rc != 0
+
+        - name: Report template creation failure after cleanup
+          ansible.builtin.fail:
+            msg: >-
+              Template creation failed for VMID {{ proxmox_template_vmid }}.
+              Partial VM cleanup was completed.
+          when:
+            - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_owns_vm_shell | default(false) | bool
+            - proxmox_template_partial_status.rc == 0
+            - proxmox_template_destroy_result.rc == 0
+
+        - name: Report template creation failure without cleanup
+          ansible.builtin.fail:
+            msg: >-
+              Template creation failed for VMID {{ proxmox_template_vmid }}.
+              No partial VM was present for cleanup.
+          when:
+            - proxmox_template_creation_phase | default('') != 'download'
+            - proxmox_template_owns_vm_shell | default(false) | bool
+            - proxmox_template_partial_status.rc == 2
+            - (proxmox_template_partial_status.msg | default('')) != 'Error executing command.'
+
+      always:
+        - name: Remove downloaded Ubuntu cloud image
+          ansible.builtin.file:
+            path: "{{ proxmox_template_image_path }}"
+            state: absent
+
+    - name: Verify final template config
+      ansible.builtin.command:
+        argv:
+          - qm
+          - config
+          - "{{ proxmox_template_vmid | string }}"
+      register: proxmox_template_final_config
+      changed_when: false
+
+    - name: Assert final VM is the expected template
+      ansible.builtin.assert:
+        that:
+          - proxmox_template_final_config.stdout is search('(?m)^template:\s*1$')
+          - >-
+            proxmox_template_final_config.stdout is search(
+            '(?m)^name:\s*' ~ (proxmox_template_name | regex_escape) ~ '$')
+        fail_msg: "Proxmox template verification failed for VMID {{ proxmox_template_vmid }}."
+
+  always:
+    - name: Release Proxmox template lock
+      ansible.builtin.command:
+        argv:
+          - sh
+          - -c
+          - |
+            set -eu
+            lock_dir=$1
+            owner=$2
+            owner_file="$lock_dir/owner"
+            if ! [ -f "$owner_file" ]; then
+              exit 0
+            fi
+            if [ "$(cat "$owner_file")" != "$owner" ]; then
+              exit 0
+            fi
+            rm "$owner_file"
+            rmdir "$lock_dir"
+          - sh
+          - "{{ proxmox_template_lock_dir }}"
+          - "{{ proxmox_template_lock_owner }}"
+      changed_when: false

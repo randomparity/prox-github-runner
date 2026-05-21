@@ -6,7 +6,7 @@ PYTHON := $(VENV)/bin/python
 UV := uv
 ACTIVATE := source $(VENV)/bin/activate
 
-.PHONY: help setup lint test inventory preflight check clean
+.PHONY: help setup lint syntax test inventory preflight check clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -28,6 +28,11 @@ lint: setup ## Run YAML, Ansible, and Python lint
 	$(ACTIVATE) && ruff format --check .
 	$(ACTIVATE) && ty check
 
+syntax: setup ## Run Ansible playbook syntax checks
+	set -e; $(ACTIVATE); for playbook in playbooks/*.yml; do \
+		ansible-playbook --syntax-check "$$playbook"; \
+	done
+
 test: setup ## Run unit tests
 	$(ACTIVATE) && pytest
 
@@ -37,7 +42,7 @@ inventory: setup ## Parse inventory
 preflight: setup ## Run GitHub preflight
 	$(ACTIVATE) && ansible-playbook playbooks/preflight.yml
 
-check: lint test inventory ## Run local verification
+check: lint syntax test inventory ## Run local verification
 
 clean: ## Move local generated files to Trash when possible
 	@if command -v trash >/dev/null 2>&1; then \
