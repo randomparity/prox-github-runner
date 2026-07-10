@@ -41,6 +41,6 @@ runner_host_docker_packages:
   - docker-compose-plugin
 runner_host_docker_gpg_url: https://download.docker.com/linux/ubuntu/gpg
 runner_host_docker_gpg_path: /etc/apt/keyrings/docker.asc
-runner_host_docker_repo: >-
-  deb [arch=amd64 signed-by={{ runner_host_docker_gpg_path }}]
-  https://download.docker.com/linux/ubuntu noble stable
+runner_host_docker_repo_uri: https://download.docker.com/linux/ubuntu
+runner_host_docker_repo_suite: noble
+runner_host_docker_repo_component: stable

@@ -37,17 +37,23 @@
   when: runner_host_apply_system | bool
 
 - name: Add the Docker apt repository
-  ansible.builtin.apt_repository:
-    repo: "{{ runner_host_docker_repo }}"
-    filename: docker
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: deb
+    uris: "{{ runner_host_docker_repo_uri }}"
+    suites: "{{ runner_host_docker_repo_suite }}"
+    components: "{{ runner_host_docker_repo_component }}"
+    architectures: amd64
+    signed_by: "{{ runner_host_docker_gpg_path }}"
     state: present
-    update_cache: true
+    enabled: true
   when: runner_host_apply_system | bool
 
 - name: Install Docker Engine (docker-ce)
   ansible.builtin.apt:
     name: "{{ runner_host_docker_packages }}"
     state: present
+    update_cache: true
   when: runner_host_apply_system | bool
 
 - name: Enable and start the Docker service
