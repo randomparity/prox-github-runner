@@ -100,11 +100,16 @@
   loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
   when: runner_host_apply_system | bool
 
-- name: Install the public-repo guard script
+- name: Install the guard and cleanup scripts
   ansible.builtin.copy:
-    src: prox-github-runner-guard.sh
-    dest: "{{ runner_host_guard_script }}"
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
     mode: "0755"
+  loop:
+    - src: prox-github-runner-guard.sh
+      dest: "{{ runner_host_guard_script }}"
+    - src: prox-github-runner-cleanup.sh
+      dest: "{{ runner_host_cleanup_script }}"
   when: runner_host_apply_system | bool
 
 - name: Install the guard systemd service and timer

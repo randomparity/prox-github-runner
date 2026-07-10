@@ -11,6 +11,7 @@ runner_host_bin_dir: /usr/local/bin
 runner_host_state_dir: /run/prox-github-runner
 runner_host_guard_script: "{{ runner_host_bin_dir }}/prox-github-runner-guard.sh"
 runner_host_guard_interval: 15min
+runner_host_cleanup_script: "{{ runner_host_bin_dir }}/prox-github-runner-cleanup.sh"
 
 runner_host_packages:
   - git
