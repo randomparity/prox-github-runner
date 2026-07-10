@@ -68,3 +68,27 @@
   ansible.builtin.command:
     argv: ["qm", "set", "{{ runner_vm_id }}", "--firewall", "1"]
   changed_when: true
+
+- name: Start runner VM
+  ansible.builtin.command:
+    argv: ["qm", "start", "{{ runner_vm_id }}"]
+  when: proxmox_vm_status.rc != 0
+  changed_when: true
+
+- name: Wait for SSH on the runner VM
+  ansible.builtin.wait_for:
+    host: "{{ runner_vm_ip }}"
+    port: 22
+    timeout: 600
+  delegate_to: localhost
+  when: proxmox_vm_wait_for_ssh | bool
+
+- name: Wait for cloud-init to finish
+  ansible.builtin.command:
+    argv: ["timeout", "900", "ssh", "-o", "StrictHostKeyChecking=accept-new",
+           "{{ runner_bootstrap_user }}@{{ runner_vm_ip }}",
+           "cloud-init", "status", "--wait"]
+  register: proxmox_vm_cloudinit
+  changed_when: false
+  failed_when: proxmox_vm_cloudinit.rc != 0
+  when: proxmox_vm_wait_for_ssh | bool

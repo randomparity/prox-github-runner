@@ -143,3 +143,15 @@ def test_firewall_denies_cidrs_and_allows_egress_hosts(tmp_path: Path) -> None:
         "objects.githubusercontent.com",
     ):
         assert host in body  # Amendment-4 allow rules present
+
+
+def test_start_logged_and_waits_are_gated(tmp_path: Path) -> None:
+    write_fake_qm(tmp_path, "absent")
+    log = tmp_path / "qm.log"
+    proc = run_role(tmp_path, {}, env_extra={"FAKE_QM_LOG": str(log), "FAKE_QM_MODE": "absent"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "start" in log.read_text()
+    tasks = Path("roles/proxmox_vm/tasks/main.yml").read_text()
+    assert "cloud-init" in tasks and "wait_for" in tasks
+    assert "proxmox_vm_wait_for_ssh" in tasks
+    assert "timeout: 900" not in tasks
