@@ -97,22 +97,33 @@ at a time. Under N concurrent services that machinery is redefined:
   shared marker. A completing job removes only its own marker. Markers drive
   cleanup scheduling and health reporting — they are **not** the stop mechanism.
 - The **stop primitive is `systemctl stop` on the runner service(s)**, not an
-  advisory flag. On SIGTERM the Actions listener stops dequeuing new jobs
-  immediately — this is the atomic "accept no new work" guarantee — and drains
-  the in-flight job; `TimeoutStopSec` (default 15 minutes) bounds the drain
-  before SIGKILL. An advisory `/run` flag cannot provide this, because the
-  listener never consults it; only the post-dispatch `JOB_COMPLETED` hook would,
-  which is too late to prevent a fresh checkout.
+  advisory flag. On SIGTERM the Actions listener (1) stops dequeuing new jobs
+  immediately — the atomic "accept no new work" guarantee — and (2) **cancels**
+  any in-flight job, which reports result `Canceled` (its `if: always()` / post
+  steps still run). `TimeoutStopSec` (default 15 minutes) bounds time-to-SIGKILL
+  if cancellation stalls; it is **not** a drain-to-completion window — the
+  runner does not wait for a running job to finish. An advisory `/run` flag
+  cannot provide guarantee (1), because the listener never consults it; only the
+  post-dispatch `JOB_COMPLETED` hook would, which is too late to prevent a fresh
+  checkout.
 - On a **hard** unsafe signal (confirmed public repo) the guard runs
   `systemctl stop` on **all N** services. Because stopping the listener is what
   prevents dequeue, there is no snapshot-then-stop race and no dependence on
   marker freshness — an orphaned marker cannot keep a service alive.
-- On a **soft**-failure threshold the guard likewise stops all N services and
-  emits the alert hook; the SIGTERM drain lets in-flight jobs finish within
-  `TimeoutStopSec`.
+- On a **soft**-failure threshold (the MVP's four consecutive soft failures
+  over ≥45 minutes) the guard likewise `systemctl stop`s all N services and
+  emits the alert hook. This **cancels** any in-flight jobs (result `Canceled`)
+  — an accepted fail-closed cost, since the threshold signals a sustained, not
+  transient, problem.
 - The "idle" reporting still uses "no **fresh** marker for any service"
   (markers older than the 12h staleness bound do not count), but this is
   **diagnostic only** — it no longer gates the stop.
+- The MVP's *second* stop actor — the `check-runner-health` playbook, which on
+  definitive unsafe repository state stopped the single runner — is likewise
+  redefined to `systemctl stop` all N services (same cancel-in-flight
+  semantics). It does **not** inherit the retired advisory flag. This preserves
+  the MVP's three-layer enforcement (deploy preflight, health-check playbook,
+  guard timer).
 - Cleanup still takes `flock` on `maintenance.lock`, serializing across
   services.
 
@@ -179,6 +190,12 @@ DNS, NTP) with:
   contradicts the Gap Analysis note that pre-commit self-provisions from the
   network; with deny-by-default egress, `pip install` would otherwise have no
   route and both jobs fail closed.
+- The GitHub Actions cache service and its blob-storage backend
+  (`*.actions.githubusercontent.com`, `*.blob.core.windows.net`), used by
+  `Swatinem/rust-cache` on every Rust job. Resolve concrete ranges from GitHub's
+  published `meta` / `actions` endpoint list at implementation. If omitted,
+  rust-cache fails soft to cold rebuilds (slower CI) rather than erroring — but
+  the concurrency design exists for wall-clock, so allow it.
 
 Deny-to-Proxmox-management, deny-to-control-host, and deny-to-configured-private
 CIDRs remain unchanged.
@@ -190,8 +207,8 @@ Concrete defaults introduced by this amendment; all MVP Operational Defaults
 unchanged.
 
 - `github_runner_count`: default `3`, supported range 3–4.
-- Runner service `TimeoutStopSec`: 15 minutes — bounds the SIGTERM drain before
-  SIGKILL when the guard stops a service.
+- Runner service `TimeoutStopSec`: 15 minutes — bounds time-to-SIGKILL if a
+  cancelled job stalls when the guard stops a service (not a drain window).
 - Scheduling-latency warning: a job queued longer than **10 minutes while zero
   services are idle**. Below that, queueing is expected for a 3–4 runner pool
   and is not a warning.
@@ -242,11 +259,11 @@ Implement in the existing MVP sprint order, with the deltas above folded in.
   the per-service active-job markers (Amendment 1).
 - **Sprint 6 — cleanup/health:** unregister and health-check playbooks
   enumerate **discovered** `actions.runner.*` units (surfacing scale-down
-  orphans, Amendment 1); the public-repo guard stops all services via
-  `systemctl stop` (SIGTERM drain, `TimeoutStopSec`) on a confirmed unsafe
-  signal; the health check reports per-service status plus scheduling latency (a
-  job queued >10 minutes while no service is idle, or any service offline, is a
-  warning).
+  orphans, Amendment 1); on a confirmed unsafe signal both the public-repo guard
+  and the health-check playbook stop all services via `systemctl stop` (SIGTERM
+  cancels the in-flight job; `TimeoutStopSec` bounds SIGKILL); the health check
+  also reports per-service status plus scheduling latency (a job queued >10
+  minutes while no service is idle, or any service offline, is a warning).
 - **Sprint 7 — smoke test + paper-archives PR:** the re-label PR in
   `paper-archives`, then drive one real CI run to green.
 
@@ -266,9 +283,9 @@ Implement in the existing MVP sprint order, with the deltas above folded in.
 - **Sprint 6:** cleanup runs twice, removes/stops all discovered services,
   leaves the VM intact, and removes the GitHub runner entries; decreasing
   `github_runner_count` (4 → 3) unregisters and removes the surplus service; a
-  hard unsafe signal `systemctl stop`s all services while draining in-flight
-  jobs within `TimeoutStopSec`; health check reports per-service status and
-  scheduling latency.
+  hard unsafe signal makes every service stop accepting new jobs immediately and
+  terminates any in-flight job as `Canceled` within `TimeoutStopSec`; health
+  check reports per-service status and scheduling latency.
 - **Overall success — runner correctness, tracked separately from repo CI
   health:**
   - every former `ubuntu-latest` job is assigned to a self-hosted runner
