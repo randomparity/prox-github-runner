@@ -36,7 +36,7 @@
 - `roles/runner_host/files/prox-github-runner-guard.sh` — public-repo guard (systemctl-stop primitive).
 - `roles/runner_host/files/prox-github-runner-cleanup.sh` — post-job cleanup (scans every per-service `_work`).
 - `roles/runner_host/templates/*.j2` — systemd guard timer/service, sudoers drop-in.
-- `playbooks/setup-runner.yml` — full converge (preflight → runner_host → github_runner).
+- `playbooks/setup-runner.yml` — converge; **created in Sprint 4 as preflight → runner_host, extended in Sprint 5 (Task 5.6) to add github_runner** so `make syntax` stays green each sprint.
 - `tests/test_runner_host_role.py`, `tests/test_runner_guard_script.py`, `tests/test_runner_cleanup_script.py`.
 
 **New role — `github_runner` (Sprint 5):**
@@ -358,35 +358,47 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Interfaces:**
 - Produces defaults: `proxmox_vm_denied_cidrs` (list: Proxmox mgmt host/24, control host), `proxmox_vm_allowed_egress_hosts` (documented list from spec Amendment 4). Firewall applied with `qm set --firewall 1` + a rules file written via the fake `qm`/`pvesh` shim. (Because live firewall wiring is Proxmox-version-specific, the test asserts the role *emits* a deny rule for each denied CIDR and enables the firewall; the concrete `pvesh`/rules path is resolved at implementation.)
 
-- [ ] **Step 1: Failing test** — assert the fake `qm` log contains `--firewall 1` and that a rendered rules file (written to a `proxmox_vm_fw_rules_path` override under tmp) contains each denied CIDR with `-j DROP`/`REJECT`.
+- [ ] **Step 1: Failing test** — assert the fake `qm` log enables the firewall (`--firewall 1`) and that the rendered rules file (`proxmox_vm_fw_rules_path`, set to a tmp path in `base_extra_vars`) contains **both** each denied CIDR with `REJECT`/`DROP` **and** the load-bearing Amendment-4 allow hosts (a dropped/empty allowlist must fail this test).
 
 ```python
-def test_firewall_denies_management_cidrs(tmp_path: Path) -> None:
+def test_firewall_denies_cidrs_and_allows_egress_hosts(tmp_path: Path) -> None:
     write_fake_qm(tmp_path, "existing")
-    rules = tmp_path / "fw.rules"
+    log = tmp_path / "qm.log"
     proc = run_role(
-        tmp_path,
-        {"runner_vm_ip": "192.168.20.50",
-         "proxmox_vm_fw_rules_path": str(rules)},
-        env_extra={"FAKE_QM_LOG": str(tmp_path/'qm.log'), "FAKE_QM_MODE": "existing"},
+        tmp_path, {},
+        env_extra={"FAKE_QM_LOG": str(log), "FAKE_QM_MODE": "existing"},
     )
     assert proc.returncode == 0, proc.stdout
-    body = rules.read_text()
-    assert "192.168.20.10" in body   # proxmox mgmt host denied
+    assert "--firewall 1" in log.read_text()
+    body = (tmp_path / "fw.rules").read_text()
+    assert "192.168.20.10" in body               # proxmox mgmt host denied
     assert "REJECT" in body or "DROP" in body
+    for host in ("static.rust-lang.org", "index.crates.io", "pypi.org",
+                 "objects.githubusercontent.com"):
+        assert host in body                       # Amendment-4 allow rules present
 ```
 
 - [ ] **Step 2: Run to verify fail** — `.venv/bin/pytest tests/test_proxmox_vm_role.py::test_firewall_denies_management_cidrs -v` → FAIL.
 
-- [ ] **Step 3: Implement** — add defaults and a `template`/`copy` task that renders the rules file and a `qm set --firewall 1` command. Defaults:
+- [ ] **Step 3: Implement** — add defaults and a `template` task that renders the rules file and a `qm set --firewall 1` command. Defaults:
 
 ```yaml
 proxmox_vm_fw_rules_path: "/etc/pve/firewall/{{ runner_vm_id }}.fw"
 proxmox_vm_denied_cidrs:
   - "{{ proxmox_api_host }}/32"
   - "192.168.20.0/24"   # Proxmox management network (operator adjusts)
+proxmox_vm_allowed_egress_hosts:   # Amendment 4 (spec) — rendered as annotated allow entries
+  - static.rust-lang.org
+  - index.crates.io
+  - static.crates.io
+  - pypi.org
+  - files.pythonhosted.org
+  - objects.githubusercontent.com
+  # DNS, NTP, GitHub API, Ubuntu mirrors, Docker registry, and the Actions
+  # cache backend are resolved from GitHub's published meta ranges at
+  # implementation and added here.
 ```
-Task renders each denied CIDR as an OUT REJECT rule above a default-allow for the documented egress hosts (DNS/NTP/GitHub/Ubuntu/Docker/crates/PyPI/rust-lang/Actions-cache). Reference the spec Amendment 4 host list in a comment.
+The template renders each `proxmox_vm_allowed_egress_hosts` entry as an annotated OUT ACCEPT rule, then each `proxmox_vm_denied_cidrs` entry as an OUT REJECT rule, then a default-deny. Emit the hostname as a rule comment so the positive test can assert its presence even though the live rule resolves to an IP set.
 
 - [ ] **Step 4: Run to verify pass** — expected PASS.
 
@@ -476,6 +488,8 @@ def test_start_logged_and_waits_are_gated(tmp_path: Path) -> None:
 **Interfaces:**
 - Produces defaults: `runner_host_packages` (git, curl, jq, build-essential, clang, python3.12, python3.12-venv, python3-pip, ca-certificates), `runner_host_tauri_libs` (the five `-dev` packages), `runner_host_user` (= `runner_bootstrap_user`), `runner_host_install_root` (`/opt/actions-runner`).
 
+**Test harness:** `tests/test_runner_host_role.py` reuses the `run_role` pattern from Task 3.1 (inherit `os.environ`, prepend `tmp_path` to `PATH`, pass a `base_extra_vars` set via `-e json`), renamed `run_runner_host` with a play that applies the `runner_host` role. Its `base_extra_vars` must supply `runner_bootstrap_user`, `github_runner_count`, and `runner_host_install_root` (override `runner_host_install_root` to a `tmp_path` dir so file creation stays in the sandbox).
+
 - [ ] **Step 1: Failing test** — run the role against a local inventory with a fake `apt-get` logging args; assert the log contains each package name and that a sudoers drop-in file is rendered granting `NOPASSWD: ALL` to the runner user, and that it passes `visudo -cf`.
 
 ```python
@@ -490,7 +504,7 @@ def test_baseline_installs_clang_and_python312(tmp_path):
 ```
 
 - [ ] **Step 2: Run to verify fail.**
-- [ ] **Step 3: Implement** — `apt` tasks over `runner_host_packages + runner_host_tauri_libs`; create user; render sudoers drop-in `runner-sudoers.j2` (`{{ runner_host_user }} ALL=(ALL) NOPASSWD:ALL`) into `/etc/sudoers.d/` with `validate: "visudo -cf %s"`.
+- [ ] **Step 3: Implement** — `apt` tasks over `runner_host_packages + runner_host_tauri_libs`; create user; render sudoers drop-in `runner-sudoers.j2` (`{{ runner_host_user }} ALL=(ALL) NOPASSWD:ALL`) into `/etc/sudoers.d/` with `validate: "visudo -cf %s"`. Also create `playbooks/setup-runner.yml` with **only** `preflight` → `runner_host` (github_runner is added in Task 5.6) so `make syntax` passes this sprint.
 - [ ] **Step 4: Run to verify pass.**
 - [ ] **Step 5: Commit** `feat(runner_host): install baseline packages, Tauri libs, runner user, sudo`.
 
@@ -568,6 +582,8 @@ def test_guard_noop_on_404(tmp_path):
 - Consumes: `github_runner_target_repo`, `github_runner_labels`. **preflight is invoked at the playbook level** (`site.yml`/`setup-runner.yml`, per Global Constraints), NOT as a `github_runner` role dependency — so `meta/main.yml` `dependencies: []`, the Sprint 5 unit tests need no `vault_github_pat`, and preflight does not run twice. The role keeps its own lightweight target-repo mismatch guard (below).
 - Produces defaults: `github_runner_count: 3`, `github_runner_version` (resolve latest stable at implementation; pin exact), `github_runner_sha256` (matching checksum), `github_runner_install_root: /opt/actions-runner`, `github_runner_name_prefix: "{{ runner_vm_name }}"`.
 
+**Test harness:** `tests/test_github_runner_role.py` reuses the Task 3.1 `run_role` pattern (renamed `run_github_runner`), with `base_extra_vars` supplying `github_runner_target_repo`, `github_runner_labels`, `github_runner_count`, `github_runner_version`, `github_runner_sha256`, and `github_runner_install_root` (overridden to a `tmp_path` dir). No `vault_github_pat` — preflight is playbook-level, not a dependency. Fakes on `PATH`: `gh`, `config.sh`, `svc.sh`, and (Task 5.3) a local HTTP server for the runner tarball.
+
 - [ ] **Step 1: Failing test** — assert the role fails when a local `svc-<index>/.runner` state file (fake) names a different repo than `github_runner_target_repo`, with a message pointing to `unregister-runner.yml`. No `vault_github_pat` is supplied (preflight is not a dependency).
 - [ ] **Step 2: Fail.**
 - [ ] **Step 3: Implement** the mismatch check reading each `svc-<index>/.runner` `gitHubUrl`.
@@ -606,6 +622,16 @@ def test_guard_noop_on_404(tmp_path):
 - [ ] **Step 1: Failing test** — the `JOB_STARTED` hook writes a timestamped marker at `/run/prox-github-runner/jobs/<runner-name>`; `JOB_COMPLETED` removes it and invokes cleanup when due.
 - [ ] **Step 2: Fail.** **Step 3: Implement** the two hook scripts (shellcheck-clean). **Step 4: Pass.**
 - [ ] **Step 5:** `make check`; **Commit** `feat(github_runner): add per-service job-started/completed hooks`.
+
+### Task 5.6: Wire github_runner into setup-runner.yml
+
+**Files:** Modify `playbooks/setup-runner.yml`; Test `tests/test_setup_runner_playbook.py`.
+
+- [ ] **Step 1: Failing test** — assert (parse `playbooks/setup-runner.yml`) that the role order is `preflight` → `runner_host` → `github_runner`, and that `ansible-playbook --syntax-check playbooks/setup-runner.yml` succeeds now that `github_runner` exists.
+- [ ] **Step 2: Run to verify fail** (role not yet appended).
+- [ ] **Step 3: Implement** — append the `github_runner` role to `setup-runner.yml` after `runner_host`.
+- [ ] **Step 4: Run to verify pass** (`make syntax` + the new test).
+- [ ] **Step 5: Commit** `feat(ops): wire github_runner into setup-runner converge`.
 
 ---
 
