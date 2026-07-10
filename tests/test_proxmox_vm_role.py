@@ -65,7 +65,59 @@ def run_role(
     return subprocess.run(cmd, text=True, capture_output=True, cwd=Path.cwd(), env=env)
 
 
+def write_fake_qm(tmp_path: Path, mode: str) -> None:
+    qm = tmp_path / "qm"
+    qm.write_text(
+        r"""#!/usr/bin/env bash
+set -euo pipefail
+log="${FAKE_QM_LOG:?}"; printf '%s\n' "$*" >> "$log"
+mode="${FAKE_QM_MODE:?}"
+case "$mode:$1" in
+  absent:status) exit 2 ;;
+  absent:clone) exit 0 ;;
+  absent:set) exit 0 ;;
+  absent:resize) exit 0 ;;
+  absent:start) exit 0 ;;
+  existing:status) exit 0 ;;
+  existing:config)
+    printf 'name: paper-archives-runner\n'
+    printf 'net0: virtio,bridge=vmbr0\n'
+    printf 'scsi0: local-lvm:vm-2100-disk-0,size=256G\n'
+    ;;
+  existing:set) exit 0 ;;
+  existing:start) exit 0 ;;
+  *) echo "unexpected qm $*" >&2; exit 42 ;;
+esac
+"""
+    )
+    qm.chmod(0o755)
+
+
 def test_missing_runner_ip_fails(tmp_path: Path) -> None:
     proc = run_role(tmp_path, {"runner_vm_ip": ""})
     assert proc.returncode != 0
     assert "Missing or invalid runner VM configuration" in proc.stdout
+
+
+def test_clone_when_absent(tmp_path: Path) -> None:
+    write_fake_qm(tmp_path, "absent")
+    log = tmp_path / "qm.log"
+    proc = run_role(
+        tmp_path,
+        {"runner_vm_ip": "192.168.20.50"},
+        env_extra={"FAKE_QM_LOG": str(log), "FAKE_QM_MODE": "absent"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "clone" in log.read_text()
+
+
+def test_identity_change_fails_when_existing(tmp_path: Path) -> None:
+    write_fake_qm(tmp_path, "existing")
+    log = tmp_path / "qm.log"
+    proc = run_role(
+        tmp_path,
+        {"runner_vm_ip": "192.168.20.50", "proxmox_template_bridge": "vmbr9"},
+        env_extra={"FAKE_QM_LOG": str(log), "FAKE_QM_MODE": "existing"},
+    )
+    assert proc.returncode != 0
+    assert "identity change" in proc.stdout.lower()

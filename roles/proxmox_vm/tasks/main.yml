@@ -13,3 +13,47 @@
       - proxmox_vm_memory_mb | int >= 2048
       - proxmox_vm_disk_gb | int >= 32
     fail_msg: "Missing or invalid runner VM configuration."
+
+- name: Read runner VM status
+  ansible.builtin.command:
+    argv: ["qm", "status", "{{ runner_vm_id }}"]
+  register: proxmox_vm_status
+  changed_when: false
+  failed_when: false
+
+- name: Read runner VM config when present
+  ansible.builtin.command:
+    argv: ["qm", "config", "{{ runner_vm_id }}"]
+  register: proxmox_vm_config
+  changed_when: false
+  when: proxmox_vm_status.rc == 0
+
+- name: Fail on identity change (bridge) when VM exists
+  ansible.builtin.fail:
+    msg: >-
+      Refusing an identity change on existing VM {{ runner_vm_id }}.
+      Bridge change requires explicit rebuild (see unregister-runner.yml).
+  when:
+    - proxmox_vm_status.rc == 0
+    - proxmox_vm_config.stdout is defined
+    - "'bridge=' ~ proxmox_template_bridge not in proxmox_vm_config.stdout"
+
+- name: Clone runner VM from template
+  ansible.builtin.command:
+    argv: ["qm", "clone", "{{ proxmox_template_vmid }}", "{{ runner_vm_id }}",
+           "--name", "{{ runner_vm_name }}", "--full", "1"]
+  when: proxmox_vm_status.rc != 0
+  changed_when: true
+
+- name: Converge CPU and memory
+  ansible.builtin.command:
+    argv: ["qm", "set", "{{ runner_vm_id }}",
+           "--cores", "{{ proxmox_vm_cpu }}",
+           "--memory", "{{ proxmox_vm_memory_mb }}"]
+  changed_when: true
+
+- name: Grow boot disk (grow-only)
+  ansible.builtin.command:
+    argv: ["qm", "resize", "{{ runner_vm_id }}", "scsi0", "{{ proxmox_vm_disk_gb }}G"]
+  when: proxmox_vm_status.rc != 0
+  changed_when: true
