@@ -13,6 +13,14 @@ github_runner_labels:
 # cross-role coordination value consumed by runner_host and github_runner.
 github_runner_count: 3
 
+# Shared on-disk contract. runner_host installs into these paths and
+# github_runner + check-runner-health read from them; they MUST agree, so the
+# canonical values live here (not duplicated per role) to avoid silent drift.
+runner_install_root: /opt/actions-runner
+runner_bin_dir: /usr/local/bin
+runner_state_dir: /run/prox-github-runner
+runner_jobs_dir: "{{ runner_state_dir }}/jobs"
+
 # Placeholder date that intentionally fails until the operator sets the real
 # fine-grained PAT expiration date.
 github_pat_expires_on: "1970-01-01"

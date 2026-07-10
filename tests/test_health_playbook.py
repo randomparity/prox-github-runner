@@ -95,8 +95,11 @@ def run_health(
         "runner_vm_name": "paper-archives-runner",
         "runner_bootstrap_user": "runner",
         "github_runner_target_repo": REPO,
-        "github_runner_install_root": str(install_root),
-        "github_runner_state_dir": str(tmp_path / "state"),
+        # Shared on-disk contract (group_vars/all) — the tmp inventory bypasses
+        # group_vars, so the play's health_* vars resolve from these.
+        "runner_install_root": str(install_root),
+        "runner_state_dir": str(tmp_path / "state"),
+        "runner_jobs_dir": str(tmp_path / "state" / "jobs"),
         "github_runner_become": False,
     }
     extra.update(overrides or {})

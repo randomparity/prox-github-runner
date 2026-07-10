@@ -15,9 +15,9 @@
     health_disk_warn_pct: 80
     health_disk_crit_pct: 90
     health_unit_glob: "actions.runner.*"
-    health_install_root: "{{ github_runner_install_root | default('/opt/actions-runner') }}"
-    health_state_dir: "{{ github_runner_state_dir | default('/run/prox-github-runner') }}"
-    health_jobs_dir: "{{ github_runner_jobs_dir | default(health_state_dir ~ '/jobs') }}"
+    health_install_root: "{{ runner_install_root }}"
+    health_state_dir: "{{ runner_state_dir }}"
+    health_jobs_dir: "{{ runner_jobs_dir }}"
     health_name_prefix: "{{ github_runner_name_prefix | default(runner_vm_name) }}"
     health_become: "{{ github_runner_become | default(true) }}"
     health_repo_slug: "{{ github_runner_target_repo | replace('/', '-') }}"

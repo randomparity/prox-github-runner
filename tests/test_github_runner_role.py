@@ -63,8 +63,12 @@ def base_extra_vars(tmp_path: Path) -> dict[str, object]:
         "github_runner_count": 3,
         "github_runner_version": "2.335.1",
         "github_runner_sha256": "a" * 64,
-        "github_runner_install_root": str(tmp_path / "actions-runner"),
-        "github_runner_bin_dir": str(tmp_path / "bin"),
+        # Shared on-disk contract (group_vars/all); the github_runner_* path
+        # defaults derive from these. The tmp inventory bypasses group_vars.
+        "runner_install_root": str(tmp_path / "actions-runner"),
+        "runner_bin_dir": str(tmp_path / "bin"),
+        "runner_state_dir": str(tmp_path / "state"),
+        "runner_jobs_dir": str(tmp_path / "state" / "jobs"),
         "github_runner_apply_system": False,
         "github_runner_become": False,
     }
@@ -252,7 +256,8 @@ def test_registers_three_unique_labeled_services_with_hooks(tmp_path: Path) -> N
     env_body = (tmp_path / "actions-runner" / "svc-1" / ".env").read_text()
     assert "ACTIONS_RUNNER_HOOK_JOB_STARTED=" in env_body
     assert "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=" in env_body
-    assert "/run/prox-github-runner/jobs/paper-archives-runner-1" in env_body
+    # Per-service marker path derives from the configured jobs dir (runner_jobs_dir).
+    assert f"{tmp_path}/state/jobs/paper-archives-runner-1" in env_body
 
 
 def _place_registered_service(install_root: Path, idx: int) -> None:

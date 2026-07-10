@@ -5,10 +5,12 @@ runner_host_apply_system: true
 
 runner_host_user: "{{ runner_bootstrap_user }}"
 runner_host_home: "/home/{{ runner_host_user }}"
-runner_host_install_root: /opt/actions-runner
+# Shared on-disk contract from inventory/group_vars/all/vars.yml (single source
+# of truth shared with github_runner and check-runner-health).
+runner_host_install_root: "{{ runner_install_root }}"
 runner_host_env_dir: /etc/prox-github-runner
-runner_host_bin_dir: /usr/local/bin
-runner_host_state_dir: /run/prox-github-runner
+runner_host_bin_dir: "{{ runner_bin_dir }}"
+runner_host_state_dir: "{{ runner_state_dir }}"
 runner_host_guard_script: "{{ runner_host_bin_dir }}/prox-github-runner-guard.sh"
 runner_host_guard_interval: 15min
 runner_host_cleanup_script: "{{ runner_host_bin_dir }}/prox-github-runner-cleanup.sh"

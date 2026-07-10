@@ -8,10 +8,12 @@ github_runner_version: "2.335.1"
 github_runner_sha256: "4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf"
 github_runner_arch: linux-x64
 
-github_runner_install_root: /opt/actions-runner
-github_runner_bin_dir: /usr/local/bin
-github_runner_state_dir: /run/prox-github-runner
-github_runner_jobs_dir: "{{ github_runner_state_dir }}/jobs"
+# Shared on-disk contract from inventory/group_vars/all/vars.yml (single source
+# of truth shared with runner_host and check-runner-health).
+github_runner_install_root: "{{ runner_install_root }}"
+github_runner_bin_dir: "{{ runner_bin_dir }}"
+github_runner_state_dir: "{{ runner_state_dir }}"
+github_runner_jobs_dir: "{{ runner_jobs_dir }}"
 
 # Runner names must be unique per repository: <vm-hostname>-<index>.
 github_runner_name_prefix: "{{ runner_vm_name }}"
