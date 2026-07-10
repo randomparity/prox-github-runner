@@ -73,8 +73,9 @@ service:
   `<vm-hostname>-<index>` (1..N), its own `_work` directory, its own
   `RUNNER_TOOL_CACHE` (the per-runner `_work/_tool` default), and its own
   `RUSTUP_HOME`, so concurrent `actions/setup-python` extractions and
-  `rustup toolchain install` runs (up to five `fuzz-smoke` jobs installing
-  `nightly` at once) never race a shared cache or toolchain store;
+  `rustup toolchain install` runs (up to `github_runner_count` (3–4) concurrent
+  `nightly` installs when `fuzz-smoke` instances co-schedule) never race a
+  shared cache or toolchain store;
 - shares `~/.cargo/registry` (cargo's own file locks make concurrent reads
   safe), the pre-installed Tauri libs, and the single Docker daemon. The
   registry is shared for cache reuse; the *toolchain* store (`RUSTUP_HOME`) is
@@ -93,27 +94,36 @@ at a time. Under N concurrent services that machinery is redefined:
 
 - The `JOB_STARTED`/`JOB_COMPLETED` hooks write a **per-service** marker keyed
   by runner name under `/run/prox-github-runner/jobs/<runner-name>`, not one
-  shared marker. A completing job removes only its own marker.
-- Markers carry a timestamp. A marker older than the MVP staleness threshold
-  (12h) is treated as **orphaned** — it does not count toward the idle test, and
-  its service is stopped immediately rather than drained.
-- The guard's "idle" test becomes "no **fresh** marker exists for **any**
-  service" (orphaned markers do not count), preserving the MVP's `fresh`-marker
-  semantics.
-- On a hard or soft stop signal the guard **first freezes all N services** by
-  writing a `stop-after-job` flag for every service, so none can accept a new
-  job during teardown; only then does it evaluate markers. This closes the
-  snapshot-then-stop race where an idle service picks up a queued job between
-  the guard's check and `systemctl stop`.
-- Services with no fresh marker are then stopped immediately; services with a
-  fresh marker drain (the completed-job hook honors the flag and stops the
-  service after the current job).
-- Each `stop-after-job` flag has a hard timeout (the same 12h bound). If the
-  completed-job hook has not fired by then, the service is force-stopped, so a
-  job that dies without `JOB_COMPLETED` cannot keep serving a now-public repo
-  indefinitely.
+  shared marker. A completing job removes only its own marker. Markers drive
+  cleanup scheduling and health reporting — they are **not** the stop mechanism.
+- The **stop primitive is `systemctl stop` on the runner service(s)**, not an
+  advisory flag. On SIGTERM the Actions listener stops dequeuing new jobs
+  immediately — this is the atomic "accept no new work" guarantee — and drains
+  the in-flight job; `TimeoutStopSec` (default 15 minutes) bounds the drain
+  before SIGKILL. An advisory `/run` flag cannot provide this, because the
+  listener never consults it; only the post-dispatch `JOB_COMPLETED` hook would,
+  which is too late to prevent a fresh checkout.
+- On a **hard** unsafe signal (confirmed public repo) the guard runs
+  `systemctl stop` on **all N** services. Because stopping the listener is what
+  prevents dequeue, there is no snapshot-then-stop race and no dependence on
+  marker freshness — an orphaned marker cannot keep a service alive.
+- On a **soft**-failure threshold the guard likewise stops all N services and
+  emits the alert hook; the SIGTERM drain lets in-flight jobs finish within
+  `TimeoutStopSec`.
+- The "idle" reporting still uses "no **fresh** marker for any service"
+  (markers older than the 12h staleness bound do not count), but this is
+  **diagnostic only** — it no longer gates the stop.
 - Cleanup still takes `flock` on `maintenance.lock`, serializing across
   services.
+
+Scaling `github_runner_count` **down** (e.g. 4 → 3) is an explicit converge
+operation. The role reconciles the running set to exactly `github_runner_count`:
+it stops, unregisters from GitHub, and removes the systemd unit of every
+locally-discovered `actions.runner.*` service whose index exceeds the target,
+before ensuring the desired N are present. Cleanup and health-check enumerate
+**discovered** `actions.runner.*` units — not just the current inventory count —
+so a scale-down orphan is surfaced and removed rather than left registered and
+job-eligible.
 
 Multiple runner VMs and ephemeral/JIT runners remain out of scope.
 
@@ -173,6 +183,19 @@ DNS, NTP) with:
 Deny-to-Proxmox-management, deny-to-control-host, and deny-to-configured-private
 CIDRs remain unchanged.
 
+### 5. Operational defaults (concurrency additions)
+
+Concrete defaults introduced by this amendment; all MVP Operational Defaults
+(PAT windows, guard cadence, disk 80/90% thresholds, 12h marker staleness) are
+unchanged.
+
+- `github_runner_count`: default `3`, supported range 3–4.
+- Runner service `TimeoutStopSec`: 15 minutes — bounds the SIGTERM drain before
+  SIGKILL when the guard stops a service.
+- Scheduling-latency warning: a job queued longer than **10 minutes while zero
+  services are idle**. Below that, queueing is expected for a 3–4 runner pool
+  and is not a warning.
+
 ## Companion Changes In `paper-archives`
 
 A separate branch/PR in the `paper-archives` repository re-labels its
@@ -217,12 +240,13 @@ Implement in the existing MVP sprint order, with the deltas above folded in.
   install of `github_runner_count` uniquely-named (`<vm-hostname>-<index>`)
   labeled services, self-updates disabled, and per-service job hooks that write
   the per-service active-job markers (Amendment 1).
-- **Sprint 6 — cleanup/health:** unregister and health-check playbooks extended
-  to enumerate all N services; the public-repo guard and stop path implement
-  the concurrency-safe "idle = no marker for any service" and
-  "stop-all-with-drain" behavior from Amendment 1; the health check reports
-  per-service status plus scheduling latency (a job queued beyond a threshold,
-  or any service offline, is a warning).
+- **Sprint 6 — cleanup/health:** unregister and health-check playbooks
+  enumerate **discovered** `actions.runner.*` units (surfacing scale-down
+  orphans, Amendment 1); the public-repo guard stops all services via
+  `systemctl stop` (SIGTERM drain, `TimeoutStopSec`) on a confirmed unsafe
+  signal; the health check reports per-service status plus scheduling latency (a
+  job queued >10 minutes while no service is idle, or any service offline, is a
+  warning).
 - **Sprint 7 — smoke test + paper-archives PR:** the re-label PR in
   `paper-archives`, then drive one real CI run to green.
 
@@ -239,10 +263,12 @@ Implement in the existing MVP sprint order, with the deltas above folded in.
   `drc-dot-nz/paper-archives` with **N distinct names** (`<vm-hostname>-<index>`),
   each carrying the `paper-archives` label and each simultaneously Online and
   Idle — not merely "a runner with the label exists".
-- **Sprint 6:** cleanup runs twice, removes/stops all N services, leaves the VM
-  intact, and removes the GitHub runner entries; a hard unsafe signal stops all
-  services while draining any in-flight job; health check reports per-service
-  status and scheduling latency.
+- **Sprint 6:** cleanup runs twice, removes/stops all discovered services,
+  leaves the VM intact, and removes the GitHub runner entries; decreasing
+  `github_runner_count` (4 → 3) unregisters and removes the surplus service; a
+  hard unsafe signal `systemctl stop`s all services while draining in-flight
+  jobs within `TimeoutStopSec`; health check reports per-service status and
+  scheduling latency.
 - **Overall success — runner correctness, tracked separately from repo CI
   health:**
   - every former `ubuntu-latest` job is assigned to a self-hosted runner
