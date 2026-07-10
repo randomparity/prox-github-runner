@@ -1,0 +1,33 @@
+---
+# Number of concurrent runner services to converge (supported range 3-4).
+github_runner_count: 3
+
+# Pinned actions/runner release (linux-x64). Resolve the latest stable release
+# and its published SHA-256 when bumping; both are verified at download time.
+github_runner_version: "2.335.1"
+github_runner_sha256: "4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf"
+github_runner_arch: linux-x64
+
+github_runner_install_root: /opt/actions-runner
+github_runner_bin_dir: /usr/local/bin
+github_runner_state_dir: /run/prox-github-runner
+github_runner_jobs_dir: "{{ github_runner_state_dir }}/jobs"
+
+# Runner names must be unique per repository: <vm-hostname>-<index>.
+github_runner_name_prefix: "{{ runner_vm_name }}"
+
+github_runner_tarball: >-
+  actions-runner-{{ github_runner_arch }}-{{ github_runner_version }}.tar.gz
+github_runner_download_url: "https://github.com/actions/runner/releases/download\
+  /v{{ github_runner_version }}/{{ github_runner_tarball }}"
+
+# Gate for tasks that mutate host-level state (jobs dir, /usr/local/bin hooks).
+# Default true (real converge); tests set false so the role applies on any host.
+github_runner_apply_system: true
+# Privilege escalation for the runner service manager (svc.sh needs root for
+# systemd unit install/start). Tests set false to run the fakes unprivileged.
+github_runner_become: true
+
+github_runner_hook_started: "{{ github_runner_bin_dir }}/prox-github-runner-job-started.sh"
+github_runner_hook_completed: "{{ github_runner_bin_dir }}/prox-github-runner-job-completed.sh"
+github_runner_cleanup_script: "{{ github_runner_bin_dir }}/prox-github-runner-cleanup.sh"
