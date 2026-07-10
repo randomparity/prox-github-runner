@@ -77,7 +77,7 @@
 ```python
 # tests/test_proxmox_vm_role.py
 from __future__ import annotations
-import subprocess, sys
+import json, os, subprocess, sys
 from pathlib import Path
 
 
@@ -95,7 +95,31 @@ all:
     )
 
 
-def run_role(tmp_path: Path, extra: dict, fake_qm_mode: str | None = None):
+def base_extra_vars(tmp_path: Path) -> dict[str, object]:
+    # Supplies every var the role requires. The tmp inventory/play bypass the
+    # repo's group_vars, so (like tests/test_proxmox_template_role.py) each run
+    # must pass the full set via -e; tests override only the var under test.
+    return {
+        "runner_vm_id": 2100,
+        "runner_vm_name": "paper-archives-runner",
+        "runner_vm_ip": "192.168.20.50",
+        "runner_vm_gateway": "192.168.20.1",
+        "runner_vm_cidr": 24,
+        "runner_vm_nameserver": "192.168.20.1",
+        "runner_bootstrap_user": "runner",
+        "proxmox_api_host": "192.168.20.10",
+        "proxmox_template_vmid": 9000,
+        "proxmox_storage": "local-lvm",
+        "proxmox_template_bridge": "vmbr0",
+        "proxmox_template_vlan": None,
+        "proxmox_vm_lock_dir": str(tmp_path / "vm.lock"),
+        "proxmox_vm_fw_rules_path": str(tmp_path / "fw.rules"),
+        "proxmox_vm_wait_for_ssh": False,  # gate the SSH/cloud-init waits in tests
+    }
+
+
+def run_role(tmp_path: Path, overrides: dict | None = None,
+             env_extra: dict | None = None):
     inv = tmp_path / "inv.yml"
     write_inventory(inv)
     play = tmp_path / "play.yml"
@@ -107,14 +131,16 @@ def run_role(tmp_path: Path, extra: dict, fake_qm_mode: str | None = None):
     - proxmox_vm
 """
     )
-    env = {"PATH": f"{tmp_path}:/usr/bin:/bin"}
-    if fake_qm_mode:
-        (tmp_path / "qm").write_text("#!/usr/bin/env bash\nexit 0\n")
-        (tmp_path / "qm").chmod(0o755)
-    cmd = ["ansible-playbook", "-i", str(inv), str(play)]
-    for k, v in extra.items():
-        cmd += ["-e", f"{k}={v}"]
-    return subprocess.run(cmd, text=True, capture_output=True, cwd=Path.cwd(), env={**env})
+    extra = base_extra_vars(tmp_path)
+    extra.update(overrides or {})
+    # Mirror run_template_playbook: inherit os.environ (HOME, ansible.cfg
+    # discovery) and PREPEND tmp_path so fake qm/ssh shadow the real ones and
+    # ansible-playbook resolves from .venv/bin.
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    env.update(env_extra or {})
+    cmd = ["ansible-playbook", "-i", str(inv), str(play), "-e", json.dumps(extra)]
+    return subprocess.run(cmd, text=True, capture_output=True,
+                          cwd=Path.cwd(), env=env)
 
 
 def test_missing_runner_ip_fails(tmp_path: Path) -> None:
@@ -149,6 +175,7 @@ proxmox_vm_vlan: "{{ proxmox_template_vlan | default(none) }}"
 proxmox_vm_lock_dir: "/var/lock/prox-github-runner-vm-{{ runner_vm_id }}.lock"
 proxmox_vm_net0: >-
   virtio,bridge={{ proxmox_template_bridge }}{%- if proxmox_vm_vlan is not none -%},tag={{ proxmox_vm_vlan }}{%- endif -%}
+proxmox_vm_wait_for_ssh: true   # tests set false to skip the live SSH/cloud-init waits
 ```
 
 `roles/proxmox_vm/tasks/main.yml` (validation block):
@@ -253,7 +280,7 @@ def test_identity_change_fails_when_existing(tmp_path: Path) -> None:
     assert "identity change" in proc.stdout.lower()
 ```
 
-Update `run_role` to accept `env_extra` and merge it into `env`.
+(`run_role` already accepts `env_extra` and merges it into the inherited env — see Task 3.1.)
 
 - [ ] **Step 2: Run to verify fail**
 
@@ -376,7 +403,21 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 **Files:** Modify `roles/proxmox_vm/tasks/main.yml`; Test `tests/test_proxmox_vm_role.py`.
 
-- [ ] **Step 1: Failing test** — with fake `qm` mode `absent`, assert log contains `start` and that the role uses `ansible.builtin.wait_for` (SSH) and a `cloud-init status --wait` command guarded by an explicit `timeout`. Test asserts the rendered task list includes a `cloud-init status --wait` invocation (parse `roles/proxmox_vm/tasks/main.yml` for the string) and that `start` is logged.
+The SSH and cloud-init waits touch a live host, so they are gated behind `proxmox_vm_wait_for_ssh` (default `true`; `base_extra_vars` sets it `false`). `wait_for` is a module and cannot be shadowed by a PATH fake, so the test must not execute it against the unroutable runner IP.
+
+- [ ] **Step 1: Failing test** — with fake `qm` mode `absent` and `proxmox_vm_wait_for_ssh=False`, assert the fake-`qm` log contains `start`, and assert (by reading `roles/proxmox_vm/tasks/main.yml`) that a `cloud-init status --wait` invocation and a `wait_for` task exist and are both guarded by `when: proxmox_vm_wait_for_ssh`.
+
+```python
+def test_start_logged_and_waits_are_gated(tmp_path: Path) -> None:
+    write_fake_qm(tmp_path, "absent")
+    log = tmp_path / "qm.log"
+    proc = run_role(tmp_path, {}, env_extra={"FAKE_QM_LOG": str(log), "FAKE_QM_MODE": "absent"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "start" in log.read_text()
+    tasks = Path("roles/proxmox_vm/tasks/main.yml").read_text()
+    assert "cloud-init" in tasks and "wait_for" in tasks
+    assert "proxmox_vm_wait_for_ssh" in tasks
+```
 
 - [ ] **Step 2: Run to verify fail.**
 
@@ -395,6 +436,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
     port: 22
     timeout: 600
   delegate_to: localhost
+  when: proxmox_vm_wait_for_ssh | bool
 
 - name: Wait for cloud-init to finish
   ansible.builtin.command:
@@ -405,6 +447,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   changed_when: false
   failed_when: proxmox_vm_cloudinit.rc != 0
   timeout: 900
+  when: proxmox_vm_wait_for_ssh | bool
 ```
 
 - [ ] **Step 4: Run to verify pass.**
@@ -522,10 +565,10 @@ def test_guard_noop_on_404(tmp_path):
 **Files:** Create `roles/github_runner/{meta,defaults,tasks}/main.yml`; Test `tests/test_github_runner_role.py`.
 
 **Interfaces:**
-- Consumes: existing `preflight` role (as a role dependency in `meta/main.yml`), `github_runner_target_repo`, `github_runner_labels`.
-- Produces defaults: `github_runner_count: 3`, `github_runner_version` (resolve latest stable at implementation; pin exact), `github_runner_install_root: /opt/actions-runner`, `github_runner_name_prefix: "{{ runner_vm_name }}"`.
+- Consumes: `github_runner_target_repo`, `github_runner_labels`. **preflight is invoked at the playbook level** (`site.yml`/`setup-runner.yml`, per Global Constraints), NOT as a `github_runner` role dependency — so `meta/main.yml` `dependencies: []`, the Sprint 5 unit tests need no `vault_github_pat`, and preflight does not run twice. The role keeps its own lightweight target-repo mismatch guard (below).
+- Produces defaults: `github_runner_count: 3`, `github_runner_version` (resolve latest stable at implementation; pin exact), `github_runner_sha256` (matching checksum), `github_runner_install_root: /opt/actions-runner`, `github_runner_name_prefix: "{{ runner_vm_name }}"`.
 
-- [ ] **Step 1: Failing test** — assert the role fails when a local `.runner` state file (fake) names a different repo than `github_runner_target_repo`, with a message pointing to `unregister-runner.yml`.
+- [ ] **Step 1: Failing test** — assert the role fails when a local `svc-<index>/.runner` state file (fake) names a different repo than `github_runner_target_repo`, with a message pointing to `unregister-runner.yml`. No `vault_github_pat` is supplied (preflight is not a dependency).
 - [ ] **Step 2: Fail.**
 - [ ] **Step 3: Implement** the mismatch check reading each `svc-<index>/.runner` `gitHubUrl`.
 - [ ] **Step 4: Pass.**
