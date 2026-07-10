@@ -246,16 +246,21 @@ case "$mode:$1" in
   absent:clone) exit 0 ;;
   absent:set) exit 0 ;;
   absent:resize) exit 0 ;;
+  absent:start) exit 0 ;;
   existing:status) exit 0 ;;
   existing:config) printf 'name: paper-archives-runner\nnet0: virtio,bridge=vmbr0\nscsi0: local-lvm:vm-2100-disk-0,size=256G\n' ;;
   existing:set) exit 0 ;;
+  existing:start) exit 0 ;;
   *) echo "unexpected qm $*" >&2; exit 42 ;;
 esac
 """
     )
     qm.chmod(0o755)
+```
 
+**Rule:** when a later task introduces a new `qm` subcommand (e.g. `start` in Task 3.4), add its `mode:subcommand) exit 0 ;;` case to `write_fake_qm` in the same task, or the catch-all `exit 42` fails that task's run. (`start` cases are already included above.)
 
+```python
 def test_clone_when_absent(tmp_path: Path) -> None:
     write_fake_qm(tmp_path, "absent")
     log = tmp_path / "qm.log"
@@ -452,15 +457,18 @@ def test_start_logged_and_waits_are_gated(tmp_path: Path) -> None:
 
 - name: Wait for cloud-init to finish
   ansible.builtin.command:
-    argv: ["ssh", "-o", "StrictHostKeyChecking=accept-new",
+    # Bound with the coreutils `timeout` binary — `timeout:` is NOT a valid
+    # command-module or task keyword. 900s wall-clock cap on the remote wait.
+    argv: ["timeout", "900", "ssh", "-o", "StrictHostKeyChecking=accept-new",
            "{{ runner_bootstrap_user }}@{{ runner_vm_ip }}",
            "cloud-init", "status", "--wait"]
   register: proxmox_vm_cloudinit
   changed_when: false
   failed_when: proxmox_vm_cloudinit.rc != 0
-  timeout: 900
   when: proxmox_vm_wait_for_ssh | bool
 ```
+
+The Task 3.4 test additionally asserts the tasks file contains no unsupported `timeout:` key on a `command` task (`assert "timeout: 900" not in tasks`) — a cheap guard against the invalid-keyword regression.
 
 - [ ] **Step 4: Run to verify pass.**
 
@@ -476,7 +484,9 @@ def test_start_logged_and_waits_are_gated(tmp_path: Path) -> None:
 
 ## PHASE / SPRINT 4 — `runner_host` role
 
-**Deliverable:** the Ubuntu baseline: packages, runner user, Docker, clang, Python 3.12, Tauri libs, passwordless sudo, per-service directories/env, and the guard + cleanup scripts (installed but not yet wired to a runner). Verified with fake `apt-get`/`systemctl` and shell-level tests of the scripts.
+**Deliverable:** the Ubuntu baseline: packages, runner user, Docker, clang, Python 3.12, Tauri libs, passwordless sudo, per-service directories/env, and the guard + cleanup scripts (installed but not yet wired to a runner).
+
+**Verification strategy (differs from Sprint 3).** The convergence tasks here use OS-mutating Ansible **modules** (`ansible.builtin.apt`/`user`/`systemd`/`file`), not module-free CLIs. Those modules do **not** resolve through `PATH` (a fake binary cannot intercept them) and `apt` will not even import on the darwin dev host. So every system-mutating task is gated behind `runner_host_apply_system` (default `true`; `base_extra_vars` sets it **false**), exactly as Sprint 3 gates its live waits behind `proxmox_vm_wait_for_ssh`. With the gate false the role applies cleanly on any host without touching real state, and Sprint 4 tests assert behavior by **parsing** `roles/runner_host/{tasks,defaults}/main.yml` and the templates. The module-free **shell scripts** (guard, cleanup — Tasks 4.4/4.5) are separate files and keep real behavioral tests with fake `curl`/`systemctl`/`docker`. Using proper modules (not `command: apt-get`) keeps `make lint` clean — this repo has no `command-instead-of-module` exception.
 
 ### Task 4.1: Baseline packages + runner user + passwordless sudo
 
@@ -486,45 +496,74 @@ def test_start_logged_and_waits_are_gated(tmp_path: Path) -> None:
 - Test: `tests/test_runner_host_role.py`
 
 **Interfaces:**
-- Produces defaults: `runner_host_packages` (git, curl, jq, build-essential, clang, python3.12, python3.12-venv, python3-pip, ca-certificates), `runner_host_tauri_libs` (the five `-dev` packages), `runner_host_user` (= `runner_bootstrap_user`), `runner_host_install_root` (`/opt/actions-runner`).
+- Produces defaults: `runner_host_packages` (git, curl, jq, build-essential, clang, python3.12, python3.12-venv, python3-pip, ca-certificates), `runner_host_tauri_libs` (the five `-dev` packages), `runner_host_user` (= `runner_bootstrap_user`), `runner_host_install_root` (`/opt/actions-runner`), `runner_host_apply_system` (default `true`).
 
-**Test harness:** `tests/test_runner_host_role.py` reuses the `run_role` pattern from Task 3.1 (inherit `os.environ`, prepend `tmp_path` to `PATH`, pass a `base_extra_vars` set via `-e json`), renamed `run_runner_host` with a play that applies the `runner_host` role. Its `base_extra_vars` must supply `runner_bootstrap_user`, `github_runner_count`, and `runner_host_install_root` (override `runner_host_install_root` to a `tmp_path` dir so file creation stays in the sandbox).
+**Test harness:** `tests/test_runner_host_role.py` reuses the `run_role` pattern from Task 3.1 (inherit `os.environ`, prepend `tmp_path` to `PATH`, pass `base_extra_vars` via `-e json`), renamed `run_runner_host`, with a play applying the `runner_host` role. Its `base_extra_vars` supplies `runner_bootstrap_user`, `github_runner_count`, `runner_host_install_root` (a `tmp_path` dir), and **`runner_host_apply_system: False`** so no real apt/user/systemd work runs. Tests then assert on the parsed role files.
 
-- [ ] **Step 1: Failing test** — run the role against a local inventory with a fake `apt-get` logging args; assert the log contains each package name and that a sudoers drop-in file is rendered granting `NOPASSWD: ALL` to the runner user, and that it passes `visudo -cf`.
+- [ ] **Step 1: Failing test** — run the role with the gate false (returns 0 on any host), then parse the role files: assert `defaults/main.yml` lists clang, python3.12(+venv), python3-pip and the five Tauri libs; assert `tasks/main.yml` uses `ansible.builtin.apt` gated by `runner_host_apply_system`; assert the sudoers template grants `NOPASSWD:ALL`.
 
 ```python
-def test_baseline_installs_clang_and_python312(tmp_path):
-    log = tmp_path / "apt.log"
-    proc = run_runner_host(tmp_path, env_extra={"FAKE_APT_LOG": str(log)})
-    assert proc.returncode == 0, proc.stdout
-    body = log.read_text()
-    assert "clang" in body and "python3.12" in body
-    for lib in ("libwebkit2gtk-4.1-dev", "libxdo-dev", "librsvg2-dev"):
-        assert lib in body
+from pathlib import Path
+
+def test_baseline_declares_clang_python312_tauri_and_sudo(tmp_path):
+    proc = run_runner_host(tmp_path)          # runner_host_apply_system=False
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    defaults = Path("roles/runner_host/defaults/main.yml").read_text()
+    for pkg in ("clang", "python3.12", "python3.12-venv", "python3-pip",
+                "libwebkit2gtk-4.1-dev", "libxdo-dev", "librsvg2-dev"):
+        assert pkg in defaults
+    tasks = Path("roles/runner_host/tasks/main.yml").read_text()
+    assert "ansible.builtin.apt" in tasks
+    assert "runner_host_apply_system" in tasks     # system tasks are gated
+    sudoers = Path("roles/runner_host/templates/runner-sudoers.j2").read_text()
+    assert "NOPASSWD:ALL" in sudoers
 ```
 
 - [ ] **Step 2: Run to verify fail.**
-- [ ] **Step 3: Implement** — `apt` tasks over `runner_host_packages + runner_host_tauri_libs`; create user; render sudoers drop-in `runner-sudoers.j2` (`{{ runner_host_user }} ALL=(ALL) NOPASSWD:ALL`) into `/etc/sudoers.d/` with `validate: "visudo -cf %s"`. Also create `playbooks/setup-runner.yml` with **only** `preflight` → `runner_host` (github_runner is added in Task 5.6) so `make syntax` passes this sprint.
+- [ ] **Step 3: Implement** — `ansible.builtin.apt` over `runner_host_packages + runner_host_tauri_libs`; `ansible.builtin.user` for the runner user; render sudoers drop-in `runner-sudoers.j2` (`{{ runner_host_user }} ALL=(ALL) NOPASSWD:ALL`) into `/etc/sudoers.d/` with `validate: "visudo -cf %s"`. **Every OS-mutating task carries `when: runner_host_apply_system | bool`.** Also create `playbooks/setup-runner.yml` with **only** `preflight` → `runner_host` (github_runner is added in Task 5.6) so `make syntax` passes this sprint.
 - [ ] **Step 4: Run to verify pass.**
 - [ ] **Step 5: Commit** `feat(runner_host): install baseline packages, Tauri libs, runner user, sudo`.
 
 ### Task 4.2: Docker Engine + runner user in docker group
 
-- [ ] **Step 1: Failing test** — assert the role adds the Docker apt repo, installs `docker-ce`, enables the service, and adds `runner_host_user` to the `docker` group (parse task file + fake `apt-get`/`usermod` log).
+- [ ] **Step 1: Failing test** — with the gate false, parse `tasks/main.yml`: assert it adds the Docker apt repo and installs `docker-ce`, enables the service via `ansible.builtin.systemd`, and adds `runner_host_user` to the `docker` group via `ansible.builtin.user` with `groups: docker` / `append: true`; assert those tasks are gated by `runner_host_apply_system`.
+
+```python
+def test_docker_install_and_group(tmp_path):
+    proc = run_runner_host(tmp_path)
+    assert proc.returncode == 0, proc.stdout
+    tasks = Path("roles/runner_host/tasks/main.yml").read_text()
+    assert "docker-ce" in tasks
+    assert "groups: docker" in tasks and "append: true" in tasks
+    assert "ansible.builtin.systemd" in tasks
+```
+
 - [ ] **Step 2: Fail.**
-- [ ] **Step 3: Implement** Docker install tasks (mirror upstream Docker apt steps) + `ansible.builtin.user` with `groups: docker, append: true`.
+- [ ] **Step 3: Implement** Docker install tasks (upstream Docker apt repo + `docker-ce`) + `ansible.builtin.user` with `groups: docker, append: true` + `ansible.builtin.systemd` enable/start, all gated by `runner_host_apply_system`.
 - [ ] **Step 4: Pass.**
 - [ ] **Step 5: Commit** `feat(runner_host): install Docker Engine and grant runner docker access`.
 
 ### Task 4.3: Per-service directories and environment (RUNNER_TOOL_CACHE, RUSTUP_HOME)
 
 **Interfaces:**
-- Consumes: `github_runner_count` (default 3; declared here in `runner_host/defaults` too so the role is testable standalone).
-- Produces: for each index `1..N`, dirs `{{ runner_host_install_root }}/svc-<index>/{_work,_tool}` and `{{ runner_host_install_root }}/svc-<index>/rustup`; a shared `{{ runner_host_user }}` `~/.cargo` remains shared. Each service's env file sets `RUNNER_TOOL_CACHE=<svc>/_tool`, `RUSTUP_HOME=<svc>/rustup`, `CARGO_HOME=~/.cargo`.
+- Consumes: `github_runner_count` (default 3; declared in `runner_host/defaults` too so the role is testable standalone), `runner_host_apply_system`.
+- Produces: for each index `1..N`, dirs `{{ runner_host_install_root }}/svc-<index>/{_work,_tool,rustup}`; `~/.cargo` stays shared. Each service's env file sets `RUNNER_TOOL_CACHE=<svc>/_tool`, `RUSTUP_HOME=<svc>/rustup`, `CARGO_HOME=~/.cargo`.
 
-- [ ] **Step 1: Failing test** — with `github_runner_count=3`, assert three per-service dirs and three env files are created, each pointing `RUSTUP_HOME` at its own `svc-<index>/rustup` and `CARGO_HOME` at the shared `~/.cargo`.
+- [ ] **Step 1: Failing test** — with the gate false and `github_runner_count=3`, parse `tasks/main.yml`: assert a `loop` over `range(1, (github_runner_count | int) + 1)` creates the per-service dirs and renders an env file per service; assert the env template sets `RUSTUP_HOME` to the per-service `svc-<index>/rustup` and `CARGO_HOME` to the shared `~/.cargo`.
+
+```python
+def test_per_service_env_isolation(tmp_path):
+    proc = run_runner_host(tmp_path, overrides={"github_runner_count": 3})
+    assert proc.returncode == 0, proc.stdout
+    tasks = Path("roles/runner_host/tasks/main.yml").read_text()
+    assert "range(1, (github_runner_count | int) + 1)" in tasks
+    env_tmpl = Path("roles/runner_host/templates/runner-env.j2").read_text()
+    assert "RUSTUP_HOME=" in env_tmpl and "rustup" in env_tmpl
+    assert "CARGO_HOME=" in env_tmpl
+```
+
 - [ ] **Step 2: Fail.**
-- [ ] **Step 3: Implement** with a `loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"` over `file`/`template` tasks.
+- [ ] **Step 3: Implement** a `loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"` over `ansible.builtin.file` (dirs) and `ansible.builtin.template` (env file `runner-env.j2`), gated by `runner_host_apply_system`.
 - [ ] **Step 4: Pass.**
 - [ ] **Step 5: Commit** `feat(runner_host): create per-service work, tool-cache, and rustup dirs`.
 
