@@ -43,7 +43,7 @@
 - `roles/github_runner/defaults/main.yml` — `github_runner_count`, `github_runner_version`, download URL/checksum, install root.
 - `roles/github_runner/tasks/main.yml` — preflight guard, token request, download+verify, per-service register (unique names), systemd install, job-hook wiring.
 - `roles/github_runner/tasks/unregister.yml` — idempotent removal reused by cleanup.
-- `tests/test_github_runner_role.py` — fake `gh`/`config.sh`/`svc.sh` behavioral tests.
+- `tests/test_github_runner_role.py` — behavioral tests: `gh` as a PATH fake; the runner's `config.sh`/`svc.sh` are directory-local (baked into the served tarball, invoked by path), not PATH fakes.
 
 **Operational playbooks (Sprint 6):**
 - `playbooks/unregister-runner.yml`, `playbooks/check-runner-health.yml`.
@@ -621,7 +621,9 @@ def test_guard_noop_on_404(tmp_path):
 - Consumes: `github_runner_target_repo`, `github_runner_labels`. **preflight is invoked at the playbook level** (`site.yml`/`setup-runner.yml`, per Global Constraints), NOT as a `github_runner` role dependency — so `meta/main.yml` `dependencies: []`, the Sprint 5 unit tests need no `vault_github_pat`, and preflight does not run twice. The role keeps its own lightweight target-repo mismatch guard (below).
 - Produces defaults: `github_runner_count: 3`, `github_runner_version` (resolve latest stable at implementation; pin exact), `github_runner_sha256` (matching checksum), `github_runner_install_root: /opt/actions-runner`, `github_runner_name_prefix: "{{ runner_vm_name }}"`.
 
-**Test harness:** `tests/test_github_runner_role.py` reuses the Task 3.1 `run_role` pattern (renamed `run_github_runner`), with `base_extra_vars` supplying `github_runner_target_repo`, `github_runner_labels`, `github_runner_count`, `github_runner_version`, `github_runner_sha256`, and `github_runner_install_root` (overridden to a `tmp_path` dir). No `vault_github_pat` — preflight is playbook-level, not a dependency. Fakes on `PATH`: `gh`, `config.sh`, `svc.sh`, and (Task 5.3) a local HTTP server for the runner tarball.
+**Test harness:** `tests/test_github_runner_role.py` reuses the Task 3.1 `run_role` pattern (renamed `run_github_runner`), with `base_extra_vars` supplying `github_runner_target_repo`, `github_runner_labels`, `github_runner_count`, `github_runner_version`, `github_runner_sha256`, and `github_runner_install_root` (overridden to a `tmp_path` dir). No `vault_github_pat` — preflight is playbook-level, not a dependency.
+
+**Fake-binary rules (important):** only `gh` (and, in Task 6.2, `systemctl`) are genuine PATH-resolved CLIs and are faked by prepending `tmp_path` to `PATH`. The runner's `config.sh`/`svc.sh` are **directory-local** scripts shipped inside the runner tarball and invoked as `./config.sh` / `sudo ./svc.sh` from each `svc-<index>` dir — they are never on `PATH`. So the Task 5.3 local HTTP server serves a tarball that **contains executable fake `config.sh`/`svc.sh`** which log their args; after unpack each `svc-<index>` has them, and the role invokes them by path (`chdir` into the svc dir, run `./config.sh`), matching real runner usage. Each Sprint 5 task's test must supply **all prior fakes** (gh + the local server/tarball with in-dir scripts), mirroring the Sprint 3 "extend the fake per new subcommand" rule.
 
 - [ ] **Step 1: Failing test** — assert the role fails when a local `svc-<index>/.runner` state file (fake) names a different repo than `github_runner_target_repo`, with a message pointing to `unregister-runner.yml`. No `vault_github_pat` is supplied (preflight is not a dependency).
 - [ ] **Step 2: Fail.**
@@ -639,20 +641,20 @@ def test_guard_noop_on_404(tmp_path):
 
 ### Task 5.3: Download + checksum-verify the runner package
 
-- [ ] **Step 1: Failing test** — fake HTTP server serves a runner tarball; role downloads to a cache and fails on checksum mismatch (mirror `test_proxmox_template_role.py` HTTP-server pattern).
+- [ ] **Step 1: Failing test** — a local HTTP server serves a runner tarball that **contains executable fake `config.sh` and `svc.sh`** (each logs its args to `$FAKE_RUNNER_LOG`); the role downloads it and fails on checksum mismatch (mirror the `test_proxmox_template_role.py` HTTP-server pattern). Assert the fakes land in each `svc-<index>` after unpack.
 - [ ] **Step 2: Fail.**
-- [ ] **Step 3: Implement** `get_url` with `checksum: "sha256:{{ github_runner_sha256 }}"`, unpack into each `svc-<index>`.
+- [ ] **Step 3: Implement** `get_url` with `checksum: "sha256:{{ github_runner_sha256 }}"`, unpack into each `svc-<index>` (so `svc-<index>/config.sh` and `svc.sh` exist for the register step).
 - [ ] **Step 4: Pass.**
 - [ ] **Step 5: Commit** `feat(github_runner): download and verify pinned runner package`.
 
 ### Task 5.4: Register N uniquely-named services + wire job hooks
 
 **Interfaces:**
-- Produces: for index `1..N`, runs `config.sh --url ... --token ... --name {{ github_runner_name_prefix }}-<index> --labels {{ github_runner_labels | join(',') }} --unattended --disableupdate`, then `svc.sh install`/`start`. Sets `ACTIONS_RUNNER_HOOK_JOB_STARTED`/`_COMPLETED` env in each service to the per-service marker-writing hook + the cleanup script.
+- Produces: for index `1..N`, `chdir`s into `svc-<index>` and runs `./config.sh --url ... --token ... --name {{ github_runner_name_prefix }}-<index> --labels {{ github_runner_labels | join(',') }} --unattended --disableupdate`, then `sudo ./svc.sh install`/`start`. Sets `ACTIONS_RUNNER_HOOK_JOB_STARTED`/`_COMPLETED` env in each service to the per-service marker-writing hook + the cleanup script.
 
-- [ ] **Step 1: Failing test** — fake `config.sh`/`svc.sh` logging args; with `github_runner_count=3`, assert three distinct `--name <prefix>-1..3`, each `--disableupdate` and the full label set; assert `svc.sh install` runs 3×; assert the job-hook env points `JOB_STARTED` at the per-service marker path `/run/prox-github-runner/jobs/<name>`.
+- [ ] **Step 1: Failing test** — using the in-dir fake `config.sh`/`svc.sh` unpacked by Task 5.3 (plus the `gh` PATH fake and local server); with `github_runner_count=3`, assert three distinct `--name <prefix>-1..3`, each with `--disableupdate` and the full label set; assert `svc.sh install` runs 3×; assert the job-hook env points `JOB_STARTED` at the per-service marker path `/run/prox-github-runner/jobs/<name>`.
 - [ ] **Step 2: Fail.**
-- [ ] **Step 3: Implement** the register loop + hook wiring. Registration guarded by existing `.runner` (skip re-register).
+- [ ] **Step 3: Implement** the register loop invoking the scripts **by path** (`ansible.builtin.command` with `chdir: "{{ install_root }}/svc-<index>"`, `argv: ["./config.sh", ...]`) + hook wiring. Registration guarded by existing `svc-<index>/.runner` (skip re-register).
 - [ ] **Step 4: Pass.**
 - [ ] **Step 5: Commit** `feat(github_runner): register N labeled services with job hooks`.
 
@@ -682,9 +684,9 @@ def test_guard_noop_on_404(tmp_path):
 
 **Files:** Create `roles/github_runner/tasks/unregister.yml`, `playbooks/unregister-runner.yml`; Test `tests/test_unregister_playbook.py`.
 
-- [ ] **Step 1: Failing test** — fake `svc.sh`/`config.sh`/`gh`; with two discovered `actions.runner.*` units but `github_runner_count=1`, assert the surplus service is stopped, `config.sh remove` is called with a removal token, and its systemd unit removed; running twice is a no-op (second run finds nothing → returns changed=false).
+- [ ] **Step 1: Failing test** — pre-place in-dir fake `svc.sh`/`config.sh` in two `svc-<index>` dirs (as Task 5.3 unpacks them) plus a `gh` PATH fake; with two discovered `svc-*` dirs but `github_runner_count=1`, assert the surplus service is stopped, `./config.sh remove` is invoked (by path) with a removal token, and its unit removed; running twice is a no-op (second run finds nothing → `changed=false`).
 - [ ] **Step 2: Fail.**
-- [ ] **Step 3: Implement** `unregister.yml`: enumerate discovered `svc-*`/units, request removal token via `gh`, `config.sh remove`, `svc.sh uninstall`, remove dirs; treat missing state as no-op.
+- [ ] **Step 3: Implement** `unregister.yml`: enumerate discovered `svc-*` dirs, request removal token via `gh`, `chdir` into each and run `./config.sh remove` / `sudo ./svc.sh uninstall` by path, remove dirs; treat missing state as no-op.
 - [ ] **Step 4: Pass.**
 - [ ] **Step 5: Commit** `feat(github_runner): idempotent unregister with scale-down reconciliation`.
 
