@@ -123,7 +123,7 @@ def test_identity_change_fails_when_existing(tmp_path: Path) -> None:
     assert "identity change" in proc.stdout.lower()
 
 
-def test_firewall_denies_cidrs_and_allows_egress_hosts(tmp_path: Path) -> None:
+def test_firewall_denies_cidrs_default_allow_hosts_are_comments(tmp_path: Path) -> None:
     write_fake_qm(tmp_path, "existing")
     log = tmp_path / "qm.log"
     proc = run_role(
@@ -134,15 +134,33 @@ def test_firewall_denies_cidrs_and_allows_egress_hosts(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stdout
     assert "--firewall 1" in log.read_text()
     body = (tmp_path / "fw.rules").read_text()
-    assert "192.168.20.10" in body  # proxmox mgmt host denied
-    assert "REJECT" in body or "DROP" in body
+    lines = body.splitlines()
+
+    # Deny-specific-CIDRs / default-allow model (Amendment 4): every denied CIDR
+    # is a REJECT rule and the policy is ACCEPT so those denies are not shadowed.
+    assert "policy_out: ACCEPT" in body
+    assert "policy_out: DROP" not in body
+    for cidr in ("192.168.20.10/32", "192.168.20.0/24"):
+        assert any("REJECT" in line and cidr in line for line in lines), cidr
+
+    # No accept-all: an OUT ACCEPT rule with no -dest matches every destination
+    # and would defeat the denies. The old template emitted exactly that.
+    for line in lines:
+        rule = line.split("#", 1)[0].strip()
+        if rule.startswith("OUT ACCEPT"):
+            assert "-dest" in rule, f"unscoped accept-all rule present: {line!r}"
+
+    # Hostname egress hosts are documentation-only comments, never live rules.
     for host in (
         "static.rust-lang.org",
         "index.crates.io",
         "pypi.org",
         "objects.githubusercontent.com",
     ):
-        assert host in body  # Amendment-4 allow rules present
+        assert host in body  # present as annotation
+        for line in lines:
+            if host in line:
+                assert line.lstrip().startswith("#"), f"{host} is not a comment: {line!r}"
 
 
 def test_start_logged_and_waits_are_gated(tmp_path: Path) -> None:

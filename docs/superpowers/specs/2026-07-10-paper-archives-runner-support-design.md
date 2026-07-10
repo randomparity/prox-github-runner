@@ -182,8 +182,33 @@ the disk driver.
 
 ### 4. Egress allowlist (Sprint 3 network isolation)
 
-Extend the MVP allowed-egress list (GitHub, Ubuntu mirrors, Docker registry,
-DNS, NTP) with:
+**Enforcement reality.** The Proxmox firewall is L3/L4 and cannot allowlist by
+hostname. The `proxmox_vm` role therefore enforces a **deny-specific-CIDRs /
+default-allow** model: `policy_out: ACCEPT` with `OUT REJECT -dest <cidr>` rules
+(emitted first, first-match-wins) for the deny-to-Proxmox-management,
+deny-to-control-host, and deny-to-configured-private CIDRs. What is *enforced*
+at this layer is those denies, not the positive host allowlist. An earlier
+draft rendered an unscoped `OUT ACCEPT` per host, which matched all traffic and
+silently shadowed both the denies and a `policy_out: DROP` — that is removed.
+
+The positive host list below is retained as **documentation only** (rendered as
+`#` comments in the generated `.fw` file): it records the destinations the
+runner needs for CI so an operator who fronts the VM with an upstream egress
+proxy can allowlist by hostname *there*. Hostname allowlisting is not enforced
+at the Proxmox layer. The documented host set (all documentation, not enforced)
+is:
+
+- `api.github.com`, `github.com`, `codeload.github.com` — API, git, and archive
+  downloads for checkout and the runner tarball.
+- `*.actions.githubusercontent.com` and `*.blob.core.windows.net` — the GitHub
+  Actions cache service and its blob-storage backend, used by
+  `Swatinem/rust-cache` on every Rust job.
+- An Ubuntu mirror host (`archive.ubuntu.com`, `security.ubuntu.com`) — apt.
+- The Docker registry host (`registry-1.docker.io`, `auth.docker.io`).
+- DNS (`:53`) and NTP (`:123`) — name resolution and time sync (UDP/TCP by
+  port, not a hostname).
+
+plus the Rust/crates/PyPI/objects entries below:
 
 - `static.rust-lang.org` — rustup toolchains, including nightly.
 - `index.crates.io` and `static.crates.io` — cargo registry index and crates.
