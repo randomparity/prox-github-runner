@@ -12,10 +12,31 @@ proxmox_vm_fw_rules_path: "/etc/pve/firewall/{{ runner_vm_id }}.fw"
 proxmox_vm_denied_cidrs:
   - "{{ proxmox_api_host }}/32"
   - "192.168.20.0/24"   # Proxmox management network (operator adjusts)
-proxmox_vm_allowed_egress_hosts:   # Amendment 4 (spec) - rendered as annotated allow entries
+# Amendment 4 (spec): documentation-only egress host list. The Proxmox firewall
+# is L3/L4 and cannot allowlist by hostname, so these are rendered as `#`
+# comments in the .fw file (not enforced) to record what the runner needs for
+# CI -- useful for an operator fronting the VM with an upstream egress proxy.
+# DNS (:53) and NTP (:123) are port-based, not hostnames, and are noted here
+# for completeness rather than listed as hosts.
+proxmox_vm_allowed_egress_hosts:
+  # GitHub API, git, and archive downloads (checkout, runner tarball).
+  - api.github.com
+  - github.com
+  - codeload.github.com
+  - objects.githubusercontent.com
+  # GitHub Actions cache service and its blob-storage backend (rust-cache).
+  - "*.actions.githubusercontent.com"
+  - "*.blob.core.windows.net"
+  # Ubuntu apt mirrors.
+  - archive.ubuntu.com
+  - security.ubuntu.com
+  # Docker registry.
+  - registry-1.docker.io
+  - auth.docker.io
+  # Rust toolchains and cargo registry.
   - static.rust-lang.org
   - index.crates.io
   - static.crates.io
+  # Python package index and wheel CDN.
   - pypi.org
   - files.pythonhosted.org
-  - objects.githubusercontent.com
