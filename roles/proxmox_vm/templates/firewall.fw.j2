@@ -1,0 +1,14 @@
+{{ ansible_managed | comment }}
+[OPTIONS]
+enable: 1
+policy_out: DROP
+
+[RULES]
+{% for host in proxmox_vm_allowed_egress_hosts %}
+# allow egress to {{ host }} (resolved to an IP set on the Proxmox host)
+OUT ACCEPT -log nolog # {{ host }}
+{% endfor %}
+{% for cidr in proxmox_vm_denied_cidrs %}
+OUT REJECT -dest {{ cidr }} -log nolog # deny runner egress to {{ cidr }}
+{% endfor %}
+OUT DROP -log nolog # default-deny egress

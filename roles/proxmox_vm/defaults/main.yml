@@ -8,3 +8,14 @@ proxmox_vm_net0: >-
   virtio,bridge={{ proxmox_template_bridge }}{%- if proxmox_vm_vlan is not none -%}
   ,tag={{ proxmox_vm_vlan }}{%- endif -%}
 proxmox_vm_wait_for_ssh: true   # tests set false to skip the live SSH/cloud-init waits
+proxmox_vm_fw_rules_path: "/etc/pve/firewall/{{ runner_vm_id }}.fw"
+proxmox_vm_denied_cidrs:
+  - "{{ proxmox_api_host }}/32"
+  - "192.168.20.0/24"   # Proxmox management network (operator adjusts)
+proxmox_vm_allowed_egress_hosts:   # Amendment 4 (spec) - rendered as annotated allow entries
+  - static.rust-lang.org
+  - index.crates.io
+  - static.crates.io
+  - pypi.org
+  - files.pythonhosted.org
+  - objects.githubusercontent.com

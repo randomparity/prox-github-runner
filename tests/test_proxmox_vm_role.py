@@ -121,3 +121,25 @@ def test_identity_change_fails_when_existing(tmp_path: Path) -> None:
     )
     assert proc.returncode != 0
     assert "identity change" in proc.stdout.lower()
+
+
+def test_firewall_denies_cidrs_and_allows_egress_hosts(tmp_path: Path) -> None:
+    write_fake_qm(tmp_path, "existing")
+    log = tmp_path / "qm.log"
+    proc = run_role(
+        tmp_path,
+        {},
+        env_extra={"FAKE_QM_LOG": str(log), "FAKE_QM_MODE": "existing"},
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "--firewall 1" in log.read_text()
+    body = (tmp_path / "fw.rules").read_text()
+    assert "192.168.20.10" in body  # proxmox mgmt host denied
+    assert "REJECT" in body or "DROP" in body
+    for host in (
+        "static.rust-lang.org",
+        "index.crates.io",
+        "pypi.org",
+        "objects.githubusercontent.com",
+    ):
+        assert host in body  # Amendment-4 allow rules present

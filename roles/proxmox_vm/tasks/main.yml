@@ -57,3 +57,14 @@
     argv: ["qm", "resize", "{{ runner_vm_id }}", "scsi0", "{{ proxmox_vm_disk_gb }}G"]
   when: proxmox_vm_status.rc != 0
   changed_when: true
+
+- name: Render Proxmox firewall rules for the runner VM
+  ansible.builtin.template:
+    src: firewall.fw.j2
+    dest: "{{ proxmox_vm_fw_rules_path }}"
+    mode: "0640"
+
+- name: Enable the Proxmox firewall on the runner VM
+  ansible.builtin.command:
+    argv: ["qm", "set", "{{ runner_vm_id }}", "--firewall", "1"]
+  changed_when: true
