@@ -1,0 +1,39 @@
+---
+# Gate for every OS-mutating task. Default true (real converge); tests set false
+# so the role applies cleanly on any host without touching apt/user/systemd.
+runner_host_apply_system: true
+
+runner_host_user: "{{ runner_bootstrap_user }}"
+runner_host_install_root: /opt/actions-runner
+
+runner_host_packages:
+  - git
+  - curl
+  - jq
+  - build-essential
+  - clang
+  - python3.12
+  - python3.12-venv
+  - python3-pip
+  - ca-certificates
+
+# Tauri desktop-app build dependencies (Amendment 2). Pre-installed so the
+# paper-archives workflows can drop their inline apt step.
+runner_host_tauri_libs:
+  - libwebkit2gtk-4.1-dev
+  - libxdo-dev
+  - libssl-dev
+  - libayatana-appindicator3-dev
+  - librsvg2-dev
+
+runner_host_docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+runner_host_docker_gpg_url: https://download.docker.com/linux/ubuntu/gpg
+runner_host_docker_gpg_path: /etc/apt/keyrings/docker.asc
+runner_host_docker_repo: >-
+  deb [arch=amd64 signed-by={{ runner_host_docker_gpg_path }}]
+  https://download.docker.com/linux/ubuntu noble stable

@@ -1,0 +1,23 @@
+---
+- name: Install baseline and Tauri packages
+  ansible.builtin.apt:
+    name: "{{ runner_host_packages + runner_host_tauri_libs }}"
+    state: present
+    update_cache: true
+  when: runner_host_apply_system | bool
+
+- name: Create the runner user
+  ansible.builtin.user:
+    name: "{{ runner_host_user }}"
+    shell: /bin/bash
+    create_home: true
+    state: present
+  when: runner_host_apply_system | bool
+
+- name: Grant the runner user passwordless sudo
+  ansible.builtin.template:
+    src: runner-sudoers.j2
+    dest: "/etc/sudoers.d/10-{{ runner_host_user }}-runner"
+    mode: "0440"
+    validate: "visudo -cf %s"
+  when: runner_host_apply_system | bool

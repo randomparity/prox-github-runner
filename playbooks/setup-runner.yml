@@ -1,0 +1,12 @@
+---
+- name: Enforce GitHub runner preflight before touching the runner host
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - preflight
+
+- name: Converge the runner host baseline
+  hosts: runner
+  gather_facts: true
+  roles:
+    - runner_host
