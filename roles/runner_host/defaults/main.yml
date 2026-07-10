@@ -4,7 +4,9 @@
 runner_host_apply_system: true
 
 runner_host_user: "{{ runner_bootstrap_user }}"
+runner_host_home: "/home/{{ runner_host_user }}"
 runner_host_install_root: /opt/actions-runner
+runner_host_env_dir: /etc/prox-github-runner
 
 runner_host_packages:
   - git

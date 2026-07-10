@@ -82,3 +82,13 @@ def test_docker_install_and_group(tmp_path: Path) -> None:
     assert "docker-ce" in tasks
     assert "groups: docker" in tasks and "append: true" in tasks
     assert "ansible.builtin.systemd" in tasks
+
+
+def test_per_service_env_isolation(tmp_path: Path) -> None:
+    proc = run_runner_host(tmp_path, overrides={"github_runner_count": 3})
+    assert proc.returncode == 0, proc.stdout
+    tasks = Path("roles/runner_host/tasks/main.yml").read_text()
+    assert "range(1, (github_runner_count | int) + 1)" in tasks
+    env_tmpl = Path("roles/runner_host/templates/runner-env.j2").read_text()
+    assert "RUSTUP_HOME=" in env_tmpl and "rustup" in env_tmpl
+    assert "CARGO_HOME=" in env_tmpl

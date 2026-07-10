@@ -1,0 +1,7 @@
+{{ ansible_managed | comment }}
+# Per-service environment for runner svc-{{ item }} (systemd EnvironmentFile).
+# Isolated tool cache and rustup toolchain store so concurrent setup-python and
+# rustup installs never race; the cargo registry stays shared for cache reuse.
+RUNNER_TOOL_CACHE={{ runner_host_install_root }}/svc-{{ item }}/_tool
+RUSTUP_HOME={{ runner_host_install_root }}/svc-{{ item }}/rustup
+CARGO_HOME={{ runner_host_home }}/.cargo

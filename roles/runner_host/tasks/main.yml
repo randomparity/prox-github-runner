@@ -63,3 +63,39 @@
     groups: docker
     append: true
   when: runner_host_apply_system | bool
+
+- name: Ensure the shared cargo registry directory exists
+  ansible.builtin.file:
+    path: "{{ runner_host_home }}/.cargo"
+    state: directory
+    owner: "{{ runner_host_user }}"
+    group: "{{ runner_host_user }}"
+    mode: "0755"
+  when: runner_host_apply_system | bool
+
+- name: Ensure the per-service environment directory exists
+  ansible.builtin.file:
+    path: "{{ runner_host_env_dir }}"
+    state: directory
+    mode: "0755"
+  when: runner_host_apply_system | bool
+
+- name: Create per-service work, tool-cache, and rustup directories
+  ansible.builtin.file:
+    path: "{{ runner_host_install_root }}/svc-{{ item[0] }}/{{ item[1] }}"
+    state: directory
+    owner: "{{ runner_host_user }}"
+    group: "{{ runner_host_user }}"
+    mode: "0755"
+  loop: >-
+    {{ range(1, (github_runner_count | int) + 1)
+       | product(['_work', '_tool', 'rustup']) | list }}
+  when: runner_host_apply_system | bool
+
+- name: Render per-service environment files
+  ansible.builtin.template:
+    src: runner-env.j2
+    dest: "{{ runner_host_env_dir }}/svc-{{ item }}.env"
+    mode: "0644"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+  when: runner_host_apply_system | bool
