@@ -64,3 +64,25 @@
   ansible.builtin.set_fact:
     github_runner_reg_token: "{{ (github_runner_token_result.stdout | from_json).token }}"
   no_log: true
+
+- name: Download and verify the pinned runner package
+  ansible.builtin.get_url:
+    url: "{{ github_runner_download_url }}"
+    dest: "{{ github_runner_install_root }}/{{ github_runner_tarball }}"
+    checksum: "sha256:{{ github_runner_sha256 }}"
+    mode: "0644"
+
+- name: Ensure each runner service directory exists
+  ansible.builtin.file:
+    path: "{{ github_runner_install_root }}/svc-{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+
+- name: Unpack the runner package into each service directory
+  ansible.builtin.unarchive:
+    src: "{{ github_runner_install_root }}/{{ github_runner_tarball }}"
+    dest: "{{ github_runner_install_root }}/svc-{{ item }}"
+    remote_src: true
+    creates: "{{ github_runner_install_root }}/svc-{{ item }}/config.sh"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"

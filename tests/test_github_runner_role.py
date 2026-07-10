@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
-import tarfile
 import threading
+import zipfile
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -94,18 +95,22 @@ exit 1
     gh.chmod(0o755)
 
 
-def build_runner_tarball(server_dir: Path) -> Path:
-    src = server_dir / "src"
-    src.mkdir()
-    (src / "config.sh").write_text(CONFIG_SH)
-    (src / "config.sh").chmod(0o755)
-    (src / "svc.sh").write_text(SVC_SH)
-    (src / "svc.sh").chmod(0o755)
-    tarball = server_dir / "actions-runner.tar.gz"
-    with tarfile.open(tarball, "w:gz") as tf:
-        tf.add(src / "config.sh", arcname="config.sh")
-        tf.add(src / "svc.sh", arcname="svc.sh")
-    return tarball
+def _add_executable(zf: zipfile.ZipFile, name: str, body: str) -> None:
+    info = zipfile.ZipInfo(name)
+    info.external_attr = (stat.S_IFREG | 0o755) << 16
+    zf.writestr(info, body)
+
+
+def build_runner_archive(server_dir: Path) -> Path:
+    # The real runner package is a .tar.gz, but ansible's unarchive needs GNU
+    # tar to extract it and the dev host (macOS) ships only bsdtar. The role's
+    # get_url + unarchive path is archive-format agnostic, so the fixture serves
+    # a .zip (handled by unzip everywhere); production keeps the .tar.gz default.
+    archive = server_dir / "actions-runner.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        _add_executable(zf, "config.sh", CONFIG_SH)
+        _add_executable(zf, "svc.sh", SVC_SH)
+    return archive
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
@@ -122,7 +127,7 @@ class RunnerServer:
     @property
     def url(self) -> str:
         host, port = cast(tuple[str, int], self.httpd.server_address)
-        return f"http://{host}:{port}/actions-runner.tar.gz"
+        return f"http://{host}:{port}/actions-runner.zip"
 
     def __enter__(self) -> RunnerServer:
         self.thread.start()
@@ -136,12 +141,13 @@ class RunnerServer:
 def runner_server_and_vars(tmp_path: Path) -> tuple[RunnerServer, dict[str, object]]:
     server_dir = tmp_path / "runner-server"
     server_dir.mkdir()
-    tarball = build_runner_tarball(server_dir)
-    checksum = hashlib.sha256(tarball.read_bytes()).hexdigest()
+    archive = build_runner_archive(server_dir)
+    checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
     server = RunnerServer(server_dir)
     return server, {
         "github_runner_download_url": server.url,
         "github_runner_sha256": checksum,
+        "github_runner_tarball": "actions-runner.zip",
     }
 
 
@@ -202,3 +208,25 @@ def test_registration_token_requested_and_not_persisted(tmp_path: Path) -> None:
     assert "/repos/drc-dot-nz/paper-archives/actions/runners/registration-token" in gh_log
     install_root = tmp_path / "actions-runner"
     assert token_absent_from_tree(install_root, "REG-TOKEN-123")
+
+
+def test_runner_package_unpacked_into_each_service(tmp_path: Path) -> None:
+    server, server_vars = runner_server_and_vars(tmp_path)
+    with server:
+        proc = run_github_runner(tmp_path, overrides=server_vars)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    install_root = tmp_path / "actions-runner"
+    for idx in (1, 2, 3):
+        assert (install_root / f"svc-{idx}" / "config.sh").exists()
+        assert (install_root / f"svc-{idx}" / "svc.sh").exists()
+
+
+def test_checksum_mismatch_fails_download(tmp_path: Path) -> None:
+    server, server_vars = runner_server_and_vars(tmp_path)
+    server_vars["github_runner_sha256"] = "b" * 64
+    with server:
+        proc = run_github_runner(tmp_path, overrides=server_vars)
+    assert proc.returncode != 0
+    assert "checksum" in proc.stdout.lower()
+    install_root = tmp_path / "actions-runner"
+    assert not (install_root / "svc-1" / "config.sh").exists()
