@@ -1,0 +1,10 @@
+---
+proxmox_vm_cpu: 16
+proxmox_vm_memory_mb: 32768
+proxmox_vm_disk_gb: 256
+proxmox_vm_vlan: "{{ proxmox_template_vlan | default(none) }}"
+proxmox_vm_lock_dir: "/var/lock/prox-github-runner-vm-{{ runner_vm_id }}.lock"
+proxmox_vm_net0: >-
+  virtio,bridge={{ proxmox_template_bridge }}{%- if proxmox_vm_vlan is not none -%}
+  ,tag={{ proxmox_vm_vlan }}{%- endif -%}
+proxmox_vm_wait_for_ssh: true   # tests set false to skip the live SSH/cloud-init waits
