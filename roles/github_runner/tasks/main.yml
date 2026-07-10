@@ -86,3 +86,76 @@
     remote_src: true
     creates: "{{ github_runner_install_root }}/svc-{{ item }}/config.sh"
   loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+
+- name: Detect existing per-service registration state
+  ansible.builtin.stat:
+    path: "{{ github_runner_install_root }}/svc-{{ item }}/.runner"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+  register: github_runner_svc_state
+
+- name: Register each runner service with a unique name
+  ansible.builtin.command:
+    chdir: "{{ github_runner_install_root }}/svc-{{ item.item }}"
+    argv:
+      - ./config.sh
+      - --url
+      - "https://github.com/{{ github_runner_target_repo }}"
+      - --token
+      - "{{ github_runner_reg_token }}"
+      - --name
+      - "{{ github_runner_name_prefix }}-{{ item.item }}"
+      - --labels
+      - "{{ github_runner_labels | join(',') }}"
+      - --unattended
+      - --disableupdate
+  loop: "{{ github_runner_svc_state.results }}"
+  loop_control:
+    label: "svc-{{ item.item }}"
+  when: not item.stat.exists
+  changed_when: true
+  no_log: true
+
+- name: Install each runner service unit
+  ansible.builtin.command:
+    chdir: "{{ github_runner_install_root }}/svc-{{ item.item }}"
+    argv: ["./svc.sh", "install", "{{ runner_bootstrap_user }}"]
+  become: "{{ github_runner_become | bool }}"
+  loop: "{{ github_runner_svc_state.results }}"
+  loop_control:
+    label: "svc-{{ item.item }}"
+  when: not item.stat.exists
+  changed_when: true
+
+- name: Create the per-service job marker directory
+  ansible.builtin.file:
+    path: "{{ github_runner_jobs_dir }}"
+    state: directory
+    mode: "0755"
+  become: "{{ github_runner_become | bool }}"
+  when: github_runner_apply_system | bool
+
+- name: Install the per-service job hook scripts
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ github_runner_bin_dir }}/{{ item }}"
+    mode: "0755"
+  become: "{{ github_runner_become | bool }}"
+  loop:
+    - prox-github-runner-job-started.sh
+    - prox-github-runner-job-completed.sh
+  when: github_runner_apply_system | bool
+
+- name: Wire per-service job hooks via the runner .env
+  ansible.builtin.template:
+    src: runner-hooks.env.j2
+    dest: "{{ github_runner_install_root }}/svc-{{ item }}/.env"
+    mode: "0644"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+
+- name: Start each runner service
+  ansible.builtin.command:
+    chdir: "{{ github_runner_install_root }}/svc-{{ item }}"
+    argv: ["./svc.sh", "start"]
+  become: "{{ github_runner_become | bool }}"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+  changed_when: true

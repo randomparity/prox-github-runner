@@ -230,3 +230,39 @@ def test_checksum_mismatch_fails_download(tmp_path: Path) -> None:
     assert "checksum" in proc.stdout.lower()
     install_root = tmp_path / "actions-runner"
     assert not (install_root / "svc-1" / "config.sh").exists()
+
+
+def test_registers_three_unique_labeled_services_with_hooks(tmp_path: Path) -> None:
+    server, server_vars = runner_server_and_vars(tmp_path)
+    with server:
+        proc = run_github_runner(tmp_path, overrides=server_vars)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    runner_log = (tmp_path / "runner.log").read_text()
+    for idx in (1, 2, 3):
+        assert f"--name paper-archives-runner-{idx}" in runner_log
+    assert runner_log.count("--disableupdate") == 3
+    assert runner_log.count("--unattended") == 3
+    assert runner_log.count("self-hosted,linux,x64,paper-archives") == 3
+    assert runner_log.count("svc install") == 3
+    assert "svc start" in runner_log
+    env_body = (tmp_path / "actions-runner" / "svc-1" / ".env").read_text()
+    assert "ACTIONS_RUNNER_HOOK_JOB_STARTED=" in env_body
+    assert "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=" in env_body
+    assert "/run/prox-github-runner/jobs/paper-archives-runner-1" in env_body
+
+
+def test_registration_skipped_when_already_registered(tmp_path: Path) -> None:
+    install_root = tmp_path / "actions-runner"
+    for idx in (1, 2, 3):
+        svc = install_root / f"svc-{idx}"
+        svc.mkdir(parents=True)
+        (svc / ".runner").write_text(
+            '{"gitHubUrl": "https://github.com/drc-dot-nz/paper-archives"}'
+        )
+    server, server_vars = runner_server_and_vars(tmp_path)
+    with server:
+        proc = run_github_runner(tmp_path, overrides=server_vars)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    runner_log = tmp_path / "runner.log"
+    body = runner_log.read_text() if runner_log.exists() else ""
+    assert "config " not in body  # config.sh never re-invoked
