@@ -5,8 +5,9 @@
   roles:
     - preflight
 
-- name: Converge the runner host baseline
+- name: Converge the runner host baseline and runner services
   hosts: runner
   gather_facts: true
   roles:
     - runner_host
+    - github_runner
