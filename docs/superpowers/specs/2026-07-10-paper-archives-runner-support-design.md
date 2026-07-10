@@ -124,8 +124,13 @@ at a time. Under N concurrent services that machinery is redefined:
   semantics). It does **not** inherit the retired advisory flag. This preserves
   the MVP's three-layer enforcement (deploy preflight, health-check playbook,
   guard timer).
-- Cleanup still takes `flock` on `maintenance.lock`, serializing across
-  services.
+- Cleanup still takes `flock` on `maintenance.lock`, serializing cleanup passes
+  against each other. Workspace cleanup must scan **every** per-service
+  `_work`/`_temp` directory, not just one. The `flock` does not serialize a
+  cleanup pass against a *running* peer job; the inherited Docker prune is safe
+  here only because it is age-gated **and** no routed `paper-archives` job uses
+  Docker (per Gap Analysis). If a Docker-using workflow is later routed to this
+  pool, gate the prune on "no other service marker fresh".
 
 Scaling `github_runner_count` **down** (e.g. 4 → 3) is an explicit converge
 operation. The role reconciles the running set to exactly `github_runner_count`:
@@ -212,6 +217,11 @@ unchanged.
 - Scheduling-latency warning: a job queued longer than **10 minutes while zero
   services are idle**. Below that, queueing is expected for a 3–4 runner pool
   and is not a warning.
+- Optional per-service resource limits: `MemoryMax` / `CPUWeight` on each runner
+  systemd unit, off by default. The 32 GB / N budget (~8 GB per concurrent job)
+  is generous, but without limits a runaway `cargo build` can OOM-kill a peer
+  job. Expose these as operator tuning knobs so a heavy build fails only its own
+  job.
 
 ## Companion Changes In `paper-archives`
 
@@ -222,7 +232,11 @@ audit; without it, preflight fails closed.
 - **Matrix jobs (`clippy`, `test`):** convert `matrix.os` to `matrix.include`
   with a per-entry `runs-on`. The Linux arm becomes
   `runs-on: [self-hosted, linux, x64, paper-archives]`; `macos-latest` and
-  `windows-latest` arms are unchanged.
+  `windows-latest` arms are unchanged. Each `include` entry must carry a
+  **literal** `runs-on` label array (not an unresolvable expression) so the
+  runner's own preflight workflow-safety audit — which fails closed on
+  `runs-on` values it cannot evaluate from static YAML — can confirm the
+  `paper-archives` label is present.
 - **Single-OS ubuntu jobs** (`fmt`, `deny`, `python-lint`, `pre-commit-checks`,
   `docs-check`, `spec-sync`, `vector-immutability`, `integration`,
   `fuzz-smoke`, `demo`): change `runs-on: ubuntu-latest` to
