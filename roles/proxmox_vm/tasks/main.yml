@@ -9,6 +9,8 @@
       - runner_vm_ip is match('\\A[0-9]{1,3}(\\.[0-9]{1,3}){3}\\Z')
       - runner_vm_gateway | length > 0
       - (runner_vm_cidr | int) >= 1 and (runner_vm_cidr | int) <= 32
+      - runner_vm_searchdomain | length > 0
+      - proxmox_vm_ssh_pubkey | length > 0
       - proxmox_vm_cpu | int >= 1
       - proxmox_vm_memory_mb | int >= 2048
       - proxmox_vm_disk_gb | int >= 32
@@ -50,6 +52,36 @@
   when: proxmox_vm_status.rc != 0
   changed_when: true
 
+# Cloud-init identity is applied clone-time only (rc != 0). The validated
+# runner_vm_ip/gateway/cidr/nameserver + bootstrap user + SSH key are meaningless
+# unless the role writes them into the clone's cloud-init config; without this
+# the VM boots on DHCP with no injected key and is unreachable at its static IP.
+# Rewriting identity on an existing VM would be an out-of-band change, so it is
+# gated to fresh clones (identity changes go through a rebuild).
+- name: Write SSH public key to a temporary file for cloud-init injection
+  ansible.builtin.copy:
+    content: "{{ proxmox_vm_ssh_pubkey }}\n"
+    dest: "{{ proxmox_vm_ssh_pubkey_file }}"
+    mode: "0600"
+  when: proxmox_vm_status.rc != 0
+
+- name: Apply cloud-init identity and network to the fresh clone
+  ansible.builtin.command:
+    argv: ["qm", "set", "{{ runner_vm_id }}",
+           "--ciuser", "{{ runner_bootstrap_user }}",
+           "--sshkeys", "{{ proxmox_vm_ssh_pubkey_file }}",
+           "--ipconfig0", "ip={{ runner_vm_ip }}/{{ runner_vm_cidr }},gw={{ runner_vm_gateway }}",
+           "--nameserver", "{{ runner_vm_nameserver }}",
+           "--searchdomain", "{{ runner_vm_searchdomain }}"]
+  when: proxmox_vm_status.rc != 0
+  changed_when: true
+
+- name: Remove the temporary SSH public key file
+  ansible.builtin.file:
+    path: "{{ proxmox_vm_ssh_pubkey_file }}"
+    state: absent
+  when: proxmox_vm_status.rc != 0
+
 # One `qm set` converges CPU, memory, and net0. The ,firewall=1 flag on net0 is
 # what activates per-VM filtering: Proxmox only applies the .fw rules (rendered
 # below with [OPTIONS] enable: 1) to a NIC that carries it. Precondition: the
@@ -64,6 +96,7 @@
   ansible.builtin.command:
     argv: ["qm", "set", "{{ runner_vm_id }}",
            "--cores", "{{ proxmox_vm_cpu }}",
+           "--cpu", "{{ proxmox_vm_cpu_type }}",
            "--memory", "{{ proxmox_vm_memory_mb }}",
            "--net0", "{{ proxmox_vm_net0 }}"]
   changed_when: true
@@ -74,11 +107,40 @@
   when: proxmox_vm_status.rc != 0
   changed_when: true
 
-- name: Render Proxmox firewall rules for the runner VM
+- name: Render Proxmox firewall rules to a staging file
   ansible.builtin.template:
     src: firewall.fw.j2
-    dest: "{{ proxmox_vm_fw_rules_path }}"
+    dest: "{{ proxmox_vm_fw_staging_path }}"
     mode: "0640"
+
+- name: Stat staged firewall rules
+  ansible.builtin.stat:
+    path: "{{ proxmox_vm_fw_staging_path }}"
+    checksum_algorithm: sha1
+  register: proxmox_vm_fw_staged
+
+- name: Stat installed firewall rules
+  ansible.builtin.stat:
+    path: "{{ proxmox_vm_fw_rules_path }}"
+    checksum_algorithm: sha1
+  register: proxmox_vm_fw_installed
+
+# /etc/pve is pmxcfs (a FUSE cluster filesystem). The template/copy modules chown
+# the destination (root:www-data -> root:root) and use an atomic temp+rename;
+# pmxcfs rejects both with EPERM. A plain cp succeeds, so install the staged file
+# with cp, only when its content differs from what is already in place.
+- name: Install firewall rules into pmxcfs
+  ansible.builtin.command:
+    argv: ["cp", "{{ proxmox_vm_fw_staging_path }}", "{{ proxmox_vm_fw_rules_path }}"]
+  when: >-
+    proxmox_vm_fw_installed.stat.checksum | default('')
+    != proxmox_vm_fw_staged.stat.checksum
+  changed_when: true
+
+- name: Remove staged firewall rules
+  ansible.builtin.file:
+    path: "{{ proxmox_vm_fw_staging_path }}"
+    state: absent
 
 - name: Start runner VM
   ansible.builtin.command:
@@ -94,12 +156,31 @@
   delegate_to: localhost
   when: proxmox_vm_wait_for_ssh | bool
 
+# Runs from the control host (delegate_to: localhost), which holds the private
+# key whose public half cloud-init injected for the bootstrap user; the pve host
+# does not have it. Retries ride out the window where sshd answers on port 22
+# before cloud-init has finished creating the user and installing the key.
+# A rebuilt VM reuses the IP but presents a new host key, so this bootstrap probe
+# must not consult or persist known_hosts (accept-new refuses a *changed* key).
+# This matches ansible.cfg host_key_checking=false for the runner connection.
 - name: Wait for cloud-init to finish
   ansible.builtin.command:
-    argv: ["timeout", "900", "ssh", "-o", "StrictHostKeyChecking=accept-new",
+    argv: ["timeout", "900", "ssh",
+           "-o", "StrictHostKeyChecking=no",
+           "-o", "UserKnownHostsFile=/dev/null",
+           "-o", "LogLevel=ERROR",
            "{{ runner_bootstrap_user }}@{{ runner_vm_ip }}",
            "cloud-init", "status", "--wait"]
   register: proxmox_vm_cloudinit
   changed_when: false
-  failed_when: proxmox_vm_cloudinit.rc != 0
+  # cloud-init --wait exit codes: 0 = done, 2 = done but degraded (a recoverable
+  # error such as Proxmox's deprecated `user:` seed schema — benign), 1 = fatal,
+  # 255 = ssh not ready yet. Accept done/degraded; keep retrying otherwise.
+  # failed_when is required so the command module's default rc!=0 failure does
+  # not override the accepted degraded (rc 2) result.
+  until: proxmox_vm_cloudinit.rc in [0, 2]
+  retries: 20
+  delay: 15
+  failed_when: proxmox_vm_cloudinit.rc not in [0, 2]
+  delegate_to: localhost
   when: proxmox_vm_wait_for_ssh | bool
