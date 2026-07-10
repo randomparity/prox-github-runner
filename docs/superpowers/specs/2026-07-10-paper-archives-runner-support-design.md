@@ -70,11 +70,16 @@ services (default `3`, supported range 3–4) on the single runner VM. Each
 service:
 
 - is its own `actions.runner.*` systemd unit with a unique runner name
-  `<vm-hostname>-<index>` (1..N), its own `_work` directory, and its own
-  `RUNNER_TOOL_CACHE` (the per-runner `_work/_tool` default), so concurrent
-  `actions/setup-python` extractions never race a shared cache;
+  `<vm-hostname>-<index>` (1..N), its own `_work` directory, its own
+  `RUNNER_TOOL_CACHE` (the per-runner `_work/_tool` default), and its own
+  `RUSTUP_HOME`, so concurrent `actions/setup-python` extractions and
+  `rustup toolchain install` runs (up to five `fuzz-smoke` jobs installing
+  `nightly` at once) never race a shared cache or toolchain store;
 - shares `~/.cargo/registry` (cargo's own file locks make concurrent reads
-  safe), the pre-installed Tauri libs, and the single Docker daemon;
+  safe), the pre-installed Tauri libs, and the single Docker daemon. The
+  registry is shared for cache reuse; the *toolchain* store (`RUSTUP_HOME`) is
+  not, because `rustup` install/update writes are less tolerant of concurrent
+  mutation than cargo's locked registry reads;
 - registers with labels `self-hosted,linux,x64,paper-archives`.
 
 The `<vm-hostname>-<index>` naming is required, not cosmetic: GitHub runner
@@ -89,10 +94,24 @@ at a time. Under N concurrent services that machinery is redefined:
 - The `JOB_STARTED`/`JOB_COMPLETED` hooks write a **per-service** marker keyed
   by runner name under `/run/prox-github-runner/jobs/<runner-name>`, not one
   shared marker. A completing job removes only its own marker.
-- The guard's "idle" test becomes "no marker exists for **any** service".
-- A hard or soft stop signal stops **all N** services, but drains in-flight
-  work by writing a per-service `stop-after-job` flag for every service that
-  currently holds a marker; only markerless services stop immediately.
+- Markers carry a timestamp. A marker older than the MVP staleness threshold
+  (12h) is treated as **orphaned** — it does not count toward the idle test, and
+  its service is stopped immediately rather than drained.
+- The guard's "idle" test becomes "no **fresh** marker exists for **any**
+  service" (orphaned markers do not count), preserving the MVP's `fresh`-marker
+  semantics.
+- On a hard or soft stop signal the guard **first freezes all N services** by
+  writing a `stop-after-job` flag for every service, so none can accept a new
+  job during teardown; only then does it evaluate markers. This closes the
+  snapshot-then-stop race where an idle service picks up a queued job between
+  the guard's check and `systemctl stop`.
+- Services with no fresh marker are then stopped immediately; services with a
+  fresh marker drain (the completed-job hook honors the flag and stops the
+  service after the current job).
+- Each `stop-after-job` flag has a hard timeout (the same 12h bound). If the
+  completed-job hook has not fired by then, the service is force-stopped, so a
+  job that dies without `JOB_COMPLETED` cannot keep serving a now-public repo
+  indefinitely.
 - Cleanup still takes `flock` on `maintenance.lock`, serializing across
   services.
 
@@ -144,6 +163,12 @@ DNS, NTP) with:
 - `index.crates.io` and `static.crates.io` — cargo registry index and crates.
 - `objects.githubusercontent.com` — release-asset downloads for
   `actions/setup-python`, `cargo-deny`, `cargo-fuzz`, and the runner tarball.
+- `pypi.org` and `files.pythonhosted.org` — pip index and wheel CDN. Required
+  by `python-lint` (`pip install ruff`) and `pre-commit-checks` (`pip install
+  pre-commit` plus each hook's PyPI-built environment). Omitting this
+  contradicts the Gap Analysis note that pre-commit self-provisions from the
+  network; with deny-by-default egress, `pip install` would otherwise have no
+  route and both jobs fail closed.
 
 Deny-to-Proxmox-management, deny-to-control-host, and deny-to-configured-private
 CIDRs remain unchanged.
@@ -170,10 +195,13 @@ audit; without it, preflight fails closed.
   leaving them causes dpkg/apt-lock failures when concurrent jobs run them at
   once. (If one must be retained, guard it with `-o DPkg::Lock::Timeout=600`
   and drop the `apt-get update`.)
-- **Add a `concurrency:` group** to the workflow (e.g. `group: ci-${{
-  github.ref }}`, `cancel-in-progress: true`) so a push plus an open PR — which
-  would otherwise queue ~26 jobs against 3–4 runners — cancels superseded runs
-  instead of starving the runner pool.
+- **Add a `concurrency:` group** to the workflow (e.g. `group:
+  ci-${{ github.ref }}`, `cancel-in-progress: true`). Its real benefit is
+  superseding **rapid re-pushes to the same ref** (repeated pushes to one PR
+  branch) — the actual pool-starvation case for a solo developer, since each
+  event enqueues 16 Linux job instances against 3–4 runners. Push-to-`main` and
+  PR runs carry different refs (`refs/heads/main` vs `refs/pull/N/merge`) and so
+  remain intentionally separate groups.
 
 ## Work Breakdown
 
@@ -202,7 +230,8 @@ Implement in the existing MVP sprint order, with the deltas above folded in.
 
 - **Sprint 3:** VM exists, started, SSH reachable, cloud-init completed; probes
   to Proxmox management SSH/API and denied CIDRs fail; `static.rust-lang.org`
-  and `index.crates.io` are reachable from the runner.
+  and `index.crates.io` are reachable from the runner; and `pip install` of a
+  trivial package from `pypi.org` succeeds.
 - **Sprint 4:** `python3.12`, `clang`, and Docker are present; the runner user
   can run `docker ps` and passwordless `sudo`; `actions/setup-python` provisions
   Python 3.12 cleanly into the tool cache.
@@ -255,8 +284,8 @@ not merely leave residue for a later job. This blast radius is accepted for a
 trusted private-repo runner; jobs needing hard isolation from peers are out of
 scope and belong to the future multi-VM / ephemeral design.
 
-**Rejected — single runner, serial jobs:** simplest, but the ~13 parallel
-Linux jobs in `paper-archives` `ci.yml` would queue behind one another, making
+**Rejected — single runner, serial jobs:** simplest, but the 16 Linux job
+instances in `paper-archives` `ci.yml` would queue behind one another, making
 CI wall-clock materially worse than GitHub-hosted. The operator explicitly
 wants concurrency.
 
