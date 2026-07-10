@@ -45,7 +45,7 @@ Each `ubuntu-latest` job in `ci.yml` maps to a runner requirement:
 | Rust toolchain via rustup (`1.92.0` **and nightly**) | all Rust jobs; `fuzz-smoke` needs nightly | Implied (dtolnay action installs it); needs egress to `static.rust-lang.org` |
 | `build-essential` **+ `clang`** | native crates; `cargo-fuzz`/libFuzzer | Gap — baseline lists `build-essential`, not `clang` |
 | **Python 3.12 + pip/venv** | `python-lint`, `pre-commit-checks`, `vector-immutability`, `demo.sh` | Gap — Sprint 4 baseline omits Python |
-| Tauri libs: `libwebkit2gtk-4.1-dev`, `libxdo-dev`, `libssl-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev` | `clippy`, `test`, `demo` | Installed by workflow via `sudo apt-get`; requires passwordless sudo |
+| Tauri libs: `libwebkit2gtk-4.1-dev`, `libxdo-dev`, `libssl-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev` | `clippy`, `test`, `demo` | Pre-install in baseline; companion PR drops the inline `sudo apt-get` step (concurrent jobs collide on the dpkg lock) |
 | Docker Engine + runner user in `docker` group | container-based actions / general | Present (Sprint 4) |
 | `jq`, `git`, `curl` | checkout, version scripts | `git`/`curl` present; `jq` cheap to add |
 | Repo-specific label `paper-archives` on every routed job | preflight label audit (fails closed otherwise) | Present in design; requires `paper-archives` workflow edits |
@@ -69,10 +69,32 @@ into scope. The `github_runner` role (Sprint 5) installs `github_runner_count`
 services (default `3`, supported range 3–4) on the single runner VM. Each
 service:
 
-- is its own `actions.runner.*` systemd unit with its own `_work` directory;
-- shares `~/.cargo/registry`, the pre-installed Tauri libs, and the single
-  Docker daemon;
+- is its own `actions.runner.*` systemd unit with a unique runner name
+  `<vm-hostname>-<index>` (1..N), its own `_work` directory, and its own
+  `RUNNER_TOOL_CACHE` (the per-runner `_work/_tool` default), so concurrent
+  `actions/setup-python` extractions never race a shared cache;
+- shares `~/.cargo/registry` (cargo's own file locks make concurrent reads
+  safe), the pre-installed Tauri libs, and the single Docker daemon;
 - registers with labels `self-hosted,linux,x64,paper-archives`.
+
+The `<vm-hostname>-<index>` naming is required, not cosmetic: GitHub runner
+names must be unique per repository, and registering a second runner under an
+existing name replaces the first, silently leaving fewer than N live runners.
+
+**Concurrency-safe job tracking and guard (re-specifies MVP single-job
+machinery).** The MVP's active-job marker and public-repo-guard stop path
+(MVP "Operational Defaults" / "Runtime Guard Behavior") assume exactly one job
+at a time. Under N concurrent services that machinery is redefined:
+
+- The `JOB_STARTED`/`JOB_COMPLETED` hooks write a **per-service** marker keyed
+  by runner name under `/run/prox-github-runner/jobs/<runner-name>`, not one
+  shared marker. A completing job removes only its own marker.
+- The guard's "idle" test becomes "no marker exists for **any** service".
+- A hard or soft stop signal stops **all N** services, but drains in-flight
+  work by writing a per-service `stop-after-job` flag for every service that
+  currently holds a marker; only markerless services stop immediately.
+- Cleanup still takes `flock` on `maintenance.lock`, serializing across
+  services.
 
 Multiple runner VMs and ephemeral/JIT runners remain out of scope.
 
@@ -83,13 +105,20 @@ Add to the host baseline:
 - `clang` (for `cargo-fuzz`/libFuzzer and native crate builds).
 - `python3.12`, `python3.12-venv`, `python3-pip` (system fallback; Ubuntu 24.04
   ships Python 3.12 as default).
-- Pre-install the five Tauri `-dev` libraries so the workflows' inline
-  `sudo apt-get install` step becomes a fast no-op.
+- Pre-install the five Tauri `-dev` libraries. **This does not make the
+  workflows' inline `sudo apt-get` step a safe no-op** — `apt-get update` and
+  `apt-get install` still take exclusive dpkg/apt locks, so two concurrent
+  Tauri-dep jobs (`clippy` + `test`) would collide and error. Pre-installing
+  instead lets the companion PR drop the inline apt step entirely (see
+  Companion Changes); the libs are already present, so the step is unnecessary.
 - Passwordless sudo for the runner user. **Security note:** this is consistent
   with the already-accepted Docker-group root-equivalence in the MVP threat
   model — a compromised workflow already has root-equivalent control of the VM.
-- Ensure the runner tool cache (`RUNNER_TOOL_CACHE`) is writable so
-  `actions/setup-python` can provision its isolated Python.
+- Ensure each service's `RUNNER_TOOL_CACHE` (the per-runner `_work/_tool`
+  default from Amendment 1) is writable so `actions/setup-python` provisions
+  its isolated Python 3.12 without racing sibling jobs. Ubuntu 24.04's system
+  Python 3.12 does not satisfy `setup-python` (which manages its own tool-cache
+  copy); the system packages are only the `demo.sh` `python3` fallback.
 - Optional speed-up: pre-install a pinned `cargo-fuzz` so `fuzz-smoke` jobs skip
   `cargo install` on every run.
 
@@ -135,8 +164,16 @@ audit; without it, preflight fails closed.
   `runs-on: [self-hosted, linux, x64, paper-archives]`.
 - **Left on GitHub-hosted:** `release.yml`, `mutants.yml`, and all
   macOS/Windows matrix arms.
-- The inline `sudo apt-get install` Tauri steps stay (idempotent; fast once the
-  libs are pre-installed on the runner).
+- **Remove the inline `sudo apt-get update && sudo apt-get install` Tauri
+  steps** from `clippy`, `test`, and `demo`. They only ever ran on the Linux
+  arm — now the self-hosted runner, where the libs are pre-installed — and
+  leaving them causes dpkg/apt-lock failures when concurrent jobs run them at
+  once. (If one must be retained, guard it with `-o DPkg::Lock::Timeout=600`
+  and drop the `apt-get update`.)
+- **Add a `concurrency:` group** to the workflow (e.g. `group: ci-${{
+  github.ref }}`, `cancel-in-progress: true`) so a push plus an open PR — which
+  would otherwise queue ~26 jobs against 3–4 runners — cancels superseded runs
+  instead of starving the runner pool.
 
 ## Work Breakdown
 
@@ -149,9 +186,15 @@ Implement in the existing MVP sprint order, with the deltas above folded in.
   toolchain deltas (`clang`, Python 3.12, Tauri libs, passwordless sudo,
   writable tool cache, optional pinned `cargo-fuzz`).
 - **Sprint 5 — `github_runner` role:** preflight, registration-token retrieval,
-  install of `github_runner_count` labeled services, self-updates disabled.
+  install of `github_runner_count` uniquely-named (`<vm-hostname>-<index>`)
+  labeled services, self-updates disabled, and per-service job hooks that write
+  the per-service active-job markers (Amendment 1).
 - **Sprint 6 — cleanup/health:** unregister and health-check playbooks extended
-  to enumerate all N services.
+  to enumerate all N services; the public-repo guard and stop path implement
+  the concurrency-safe "idle = no marker for any service" and
+  "stop-all-with-drain" behavior from Amendment 1; the health check reports
+  per-service status plus scheduling latency (a job queued beyond a threshold,
+  or any service offline, is a warning).
 - **Sprint 7 — smoke test + paper-archives PR:** the re-label PR in
   `paper-archives`, then drive one real CI run to green.
 
@@ -164,14 +207,28 @@ Implement in the existing MVP sprint order, with the deltas above folded in.
   can run `docker ps` and passwordless `sudo`; `actions/setup-python` provisions
   Python 3.12 cleanly into the tool cache.
 - **Sprint 5:** preflight runs before registration; GitHub lists N runners for
-  `drc-dot-nz/paper-archives`, each carrying the `paper-archives` label; the N
-  services are active.
+  `drc-dot-nz/paper-archives` with **N distinct names** (`<vm-hostname>-<index>`),
+  each carrying the `paper-archives` label and each simultaneously Online and
+  Idle — not merely "a runner with the label exists".
 - **Sprint 6:** cleanup runs twice, removes/stops all N services, leaves the VM
-  intact, and removes the GitHub runner entries; health check reports per-service
-  status.
-- **Overall success:** a PR in `paper-archives` shows every former
-  `ubuntu-latest` job executing on the self-hosted runner (3–4 concurrently),
-  macOS/Windows arms still GitHub-hosted, and CI green.
+  intact, and removes the GitHub runner entries; a hard unsafe signal stops all
+  services while draining any in-flight job; health check reports per-service
+  status and scheduling latency.
+- **Overall success — runner correctness, tracked separately from repo CI
+  health:**
+  - every former `ubuntu-latest` job is assigned to a self-hosted runner
+    carrying the `paper-archives` label (inspect the run's per-job runner
+    assignments); macOS/Windows arms still run GitHub-hosted;
+  - toolchain and dependency resolution succeed on the runner (Rust stable and
+    nightly, Python 3.12, Tauri libs, Docker);
+  - **concurrency is observed** — at least one moment in the run where multiple
+    services are simultaneously Busy (from per-job start/finish timestamps or a
+    `check-runner-health` snapshot), proving parallel rather than serial
+    execution;
+  - repo-CI outcome ("all jobs green") is tracked **separately**, because
+    `fuzz-smoke` pins `nightly` and can fail for repo or toolchain reasons
+    unrelated to the runner; a red nightly job does not by itself mean the
+    runner is misprovisioned.
 
 ## Alternatives Considered
 
@@ -190,6 +247,14 @@ private-repo runner whose threat model already grants a compromised workflow
 root-equivalent control of its VM (Docker socket, passwordless sudo). Shared
 toolchain, shared cache, and one VM to converge win for this use case.
 
+**Accepted new risk from concurrency.** Unlike the MVP's sequential model, N
+jobs now run at the same time on one VM with shared passwordless sudo, one
+Docker daemon, shared `~/.cargo/registry`, and shared `/tmp`. A buggy or
+compromised job can therefore fail or corrupt a **peer running concurrently**,
+not merely leave residue for a later job. This blast radius is accepted for a
+trusted private-repo runner; jobs needing hard isolation from peers are out of
+scope and belong to the future multi-VM / ephemeral design.
+
 **Rejected — single runner, serial jobs:** simplest, but the ~13 parallel
 Linux jobs in `paper-archives` `ci.yml` would queue behind one another, making
 CI wall-clock materially worse than GitHub-hosted. The operator explicitly
@@ -207,5 +272,7 @@ to track it in lockstep.
 - Offloading `release.yml` or `mutants.yml`.
 - macOS/Windows jobs (cannot run on this Linux runner).
 - Multiple runner VMs, ephemeral/JIT runners, organization-level runners.
+- Hard isolation between concurrently-running jobs (see the accepted-risk note
+  in Alternatives Considered).
 - Repository-specific build caches beyond the shared `~/.cargo/registry` and
   the GitHub Actions remote cache used by `Swatinem/rust-cache`.
