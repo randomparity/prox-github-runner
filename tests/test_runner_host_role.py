@@ -73,3 +73,12 @@ def test_baseline_declares_clang_python312_tauri_and_sudo(tmp_path: Path) -> Non
     assert "runner_host_apply_system" in tasks  # system tasks are gated
     sudoers = Path("roles/runner_host/templates/runner-sudoers.j2").read_text()
     assert "NOPASSWD:ALL" in sudoers
+
+
+def test_docker_install_and_group(tmp_path: Path) -> None:
+    proc = run_runner_host(tmp_path)
+    assert proc.returncode == 0, proc.stdout
+    tasks = Path("roles/runner_host/tasks/main.yml").read_text()
+    assert "docker-ce" in tasks
+    assert "groups: docker" in tasks and "append: true" in tasks
+    assert "ansible.builtin.systemd" in tasks
