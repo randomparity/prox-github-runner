@@ -175,6 +175,13 @@ def run_github_runner(
     return subprocess.run(cmd, text=True, capture_output=True, cwd=Path.cwd(), env=env)
 
 
+def token_absent_from_tree(root: Path, token: str) -> bool:
+    for path in root.rglob("*"):
+        if path.is_file() and token in path.read_text(errors="ignore"):
+            return False
+    return True
+
+
 def test_target_repo_mismatch_fails(tmp_path: Path) -> None:
     root = tmp_path / "actions-runner" / "svc-1"
     root.mkdir(parents=True)
@@ -183,3 +190,15 @@ def test_target_repo_mismatch_fails(tmp_path: Path) -> None:
     assert proc.returncode != 0
     assert "unregister-runner.yml" in proc.stdout
     assert "different repository" in proc.stdout
+
+
+def test_registration_token_requested_and_not_persisted(tmp_path: Path) -> None:
+    server, server_vars = runner_server_and_vars(tmp_path)
+    with server:
+        proc = run_github_runner(tmp_path, overrides=server_vars)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    gh_log = (tmp_path / "gh.log").read_text()
+    assert "registration-token" in gh_log
+    assert "/repos/drc-dot-nz/paper-archives/actions/runners/registration-token" in gh_log
+    install_root = tmp_path / "actions-runner"
+    assert token_absent_from_tree(install_root, "REG-TOKEN-123")

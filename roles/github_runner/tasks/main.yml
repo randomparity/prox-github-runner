@@ -43,3 +43,24 @@
   when:
     - item.content is defined
     - github_runner_target_repo not in (item.content | b64decode)
+
+- name: Request a short-lived runner registration token
+  ansible.builtin.command:
+    argv:
+      - gh
+      - api
+      - --method
+      - POST
+      - -H
+      - "Accept: application/vnd.github+json"
+      - "/repos/{{ github_runner_target_repo }}/actions/runners/registration-token"
+  environment:
+    GH_TOKEN: "{{ vault_github_pat | default('') }}"
+  register: github_runner_token_result
+  changed_when: false
+  no_log: true
+
+- name: Extract the registration token into a transient fact
+  ansible.builtin.set_fact:
+    github_runner_reg_token: "{{ (github_runner_token_result.stdout | from_json).token }}"
+  no_log: true
