@@ -255,6 +255,36 @@ def test_registers_three_unique_labeled_services_with_hooks(tmp_path: Path) -> N
     assert "/run/prox-github-runner/jobs/paper-archives-runner-1" in env_body
 
 
+def _place_registered_service(install_root: Path, idx: int) -> None:
+    svc = install_root / f"svc-{idx}"
+    svc.mkdir(parents=True)
+    for name, body in (("config.sh", CONFIG_SH), ("svc.sh", SVC_SH)):
+        script = svc / name
+        script.write_text(body)
+        script.chmod(0o755)
+    (svc / ".runner").write_text('{"gitHubUrl": "https://github.com/drc-dot-nz/paper-archives"}')
+
+
+def test_converge_with_lower_count_removes_surplus(tmp_path: Path) -> None:
+    install_root = tmp_path / "actions-runner"
+    for idx in (1, 2, 3, 4):
+        _place_registered_service(install_root, idx)
+    server, server_vars = runner_server_and_vars(tmp_path)
+    with server:
+        proc = run_github_runner(tmp_path, overrides={**server_vars, "github_runner_count": 3})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # The surplus service (index 4 > target 3) is unregistered and removed;
+    # the target set is retained.
+    assert not (install_root / "svc-4").exists()
+    for idx in (1, 2, 3):
+        assert (install_root / f"svc-{idx}").exists()
+    runner_log = (tmp_path / "runner.log").read_text()
+    assert "svc uninstall" in runner_log
+    assert "config remove" in runner_log
+    gh_log = (tmp_path / "gh.log").read_text()
+    assert "remove-token" in gh_log
+
+
 def test_registration_skipped_when_already_registered(tmp_path: Path) -> None:
     install_root = tmp_path / "actions-runner"
     for idx in (1, 2, 3):

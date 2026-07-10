@@ -22,6 +22,7 @@
     health_become: "{{ github_runner_become | default(true) }}"
     health_repo_slug: "{{ github_runner_target_repo | replace('/', '-') }}"
     health_unit_base: "actions.runner.{{ health_repo_slug }}.{{ health_name_prefix }}"
+    health_target_count: "{{ github_runner_count | default(3) }}"
   tasks:
     # run_once: repo-scoped PAT call delegated to localhost so the PAT never
     # reaches the runner VM; these plays never use strategy: free (noqa below).
@@ -88,6 +89,14 @@
              | map(attribute='stdout') | map('trim')
              | reject('equalto', 'active') | list }}
 
+    - name: Identify active services beyond the target count
+      ansible.builtin.set_fact:
+        health_surplus_active: >-
+          {{ health_service_state.results | selectattr('stdout', 'defined')
+             | selectattr('stdout', 'match', 'active')
+             | map(attribute='item') | map('int')
+             | select('gt', health_target_count | int) | list }}
+
     - name: Find job markers older than the scheduling-latency threshold
       ansible.builtin.find:
         paths: "{{ health_jobs_dir }}"
@@ -130,6 +139,10 @@
         health_warnings: >-
           {{ (['services offline: ' ~ (health_offline | join(', '))]
               if health_offline | length > 0 else [])
+             + (['surplus services active beyond target count '
+                 ~ health_target_count ~ ': svc-'
+                 ~ (health_surplus_active | join(', svc-'))]
+                if health_surplus_active | length > 0 else [])
              + (['scheduling latency: ' ~ health_stale_markers.matched
                  ~ ' job(s) past the ' ~ health_latency_seconds ~ 's threshold']
                 if health_stale_markers.matched > 0 else [])

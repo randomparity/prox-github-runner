@@ -15,6 +15,13 @@
     state: directory
     mode: "0755"
 
+# Scale-down reconciliation: before scaling up, stop/unregister/remove any
+# discovered svc-* whose index exceeds github_runner_count so a lowered count
+# never leaves surplus services registered and job-eligible (spec Amendment 1).
+# A no-op when there is no surplus.
+- name: Reconcile surplus runner services down to the target count
+  ansible.builtin.import_tasks: unregister.yml
+
 - name: Discover existing runner registration state
   ansible.builtin.find:
     paths: "{{ github_runner_install_root }}"

@@ -164,3 +164,15 @@ def test_high_disk_usage_warns(tmp_path: Path) -> None:
     proc = run_health(tmp_path, env_extra={"FAKE_DISK_PCT": "95"})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "disk usage critical" in proc.stdout
+
+
+def test_active_surplus_index_warns(tmp_path: Path) -> None:
+    # A discovered service whose index exceeds the target count is a scale-down
+    # orphan; if it is still active the health check must surface it (not only
+    # offline units). svc-4 is beyond a target of 3 and active by default.
+    (tmp_path / "actions-runner" / "svc-4").mkdir(parents=True, exist_ok=True)
+    proc = run_health(tmp_path, overrides={"github_runner_count": 3})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "HEALTH WARNING" in proc.stdout
+    assert "surplus services active beyond target count 3" in proc.stdout
+    assert "svc-4" in proc.stdout
