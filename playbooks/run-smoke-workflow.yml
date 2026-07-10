@@ -16,7 +16,9 @@
     smoke_poll_retries: 60
     smoke_poll_delay: 10
   tasks:
-    - name: Look up the smoke workflow in the repository
+    # run_once: repo-scoped PAT calls are delegated to localhost so the PAT
+    # never reaches the runner VM; these plays never use strategy: free.
+    - name: Look up the smoke workflow in the repository  # noqa: run-once[task]
       ansible.builtin.command:
         argv:
           - gh
@@ -27,6 +29,9 @@
       register: smoke_lookup
       changed_when: false
       failed_when: false
+      no_log: true
+      delegate_to: localhost
+      run_once: true
 
     - name: Report when the smoke workflow is not present
       ansible.builtin.debug:
@@ -41,7 +46,7 @@
       environment:
         GH_TOKEN: "{{ vault_github_pat | default('') }}"
       block:
-        - name: Dispatch the smoke workflow
+        - name: Dispatch the smoke workflow  # noqa: run-once[task]
           ansible.builtin.command:
             argv:
               - gh
@@ -53,8 +58,11 @@
               - --ref
               - "{{ smoke_ref }}"
           changed_when: true
+          no_log: true
+          delegate_to: localhost
+          run_once: true
 
-        - name: Find the dispatched run
+        - name: Find the dispatched run  # noqa: run-once[task]
           ansible.builtin.command:
             argv:
               - gh
@@ -75,12 +83,15 @@
           retries: "{{ smoke_poll_retries | int }}"
           delay: "{{ smoke_poll_delay | int }}"
           until: (smoke_run_list.stdout | from_json | length) > 0
+          no_log: true
+          delegate_to: localhost
+          run_once: true
 
         - name: Record the dispatched run id
           ansible.builtin.set_fact:
             smoke_run_id: "{{ (smoke_run_list.stdout | from_json)[0].databaseId }}"
 
-        - name: Poll the smoke run until it completes
+        - name: Poll the smoke run until it completes  # noqa: run-once[task]
           ansible.builtin.command:
             argv:
               - gh
@@ -96,6 +107,9 @@
           retries: "{{ smoke_poll_retries | int }}"
           delay: "{{ smoke_poll_delay | int }}"
           until: (smoke_run_view.stdout | from_json).status == "completed"
+          no_log: true
+          delegate_to: localhost
+          run_once: true
 
         - name: Fail when the smoke run did not succeed
           ansible.builtin.fail:

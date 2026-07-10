@@ -200,6 +200,7 @@ def test_target_repo_mismatch_fails(tmp_path: Path) -> None:
 
 def test_registration_token_requested_and_not_persisted(tmp_path: Path) -> None:
     server, server_vars = runner_server_and_vars(tmp_path)
+    server_vars["vault_github_pat"] = "PAT-SENTINEL-XYZ"
     with server:
         proc = run_github_runner(tmp_path, overrides=server_vars)
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -207,7 +208,10 @@ def test_registration_token_requested_and_not_persisted(tmp_path: Path) -> None:
     assert "registration-token" in gh_log
     assert "/repos/drc-dot-nz/paper-archives/actions/runners/registration-token" in gh_log
     install_root = tmp_path / "actions-runner"
+    # Only the short-lived registration token reaches the VM (via config.sh);
+    # neither it nor the repo-admin PAT is ever written under the install root.
     assert token_absent_from_tree(install_root, "REG-TOKEN-123")
+    assert token_absent_from_tree(install_root, "PAT-SENTINEL-XYZ")
 
 
 def test_runner_package_unpacked_into_each_service(tmp_path: Path) -> None:

@@ -23,7 +23,9 @@
     health_repo_slug: "{{ github_runner_target_repo | replace('/', '-') }}"
     health_unit_base: "actions.runner.{{ health_repo_slug }}.{{ health_name_prefix }}"
   tasks:
-    - name: Query target repository privacy
+    # run_once: repo-scoped PAT call delegated to localhost so the PAT never
+    # reaches the runner VM; these plays never use strategy: free (noqa below).
+    - name: Query target repository privacy  # noqa: run-once[task]
       ansible.builtin.command:
         argv:
           - gh
@@ -36,6 +38,9 @@
       register: health_repo_result
       changed_when: false
       failed_when: false
+      no_log: true
+      delegate_to: localhost
+      run_once: true
 
     - name: Determine definitive-unsafe (confirmed public) repository state
       ansible.builtin.set_fact:

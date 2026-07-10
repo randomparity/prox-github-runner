@@ -59,6 +59,8 @@
   register: github_runner_token_result
   changed_when: false
   no_log: true
+  delegate_to: localhost
+  run_once: true
 
 - name: Extract the registration token into a transient fact
   ansible.builtin.set_fact:
