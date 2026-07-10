@@ -25,6 +25,9 @@ runner_host_packages:
   - python3.12-venv
   - python3-pip
   - ca-certificates
+  # Lets Proxmox report the guest IP and do graceful shutdown / fs-freeze; the
+  # template sets `--agent enabled=1` host-side, this provides the guest half.
+  - qemu-guest-agent
 
 # Tauri desktop-app build dependencies (Amendment 2). Pre-installed so the
 # paper-archives workflows can drop their inline apt step.

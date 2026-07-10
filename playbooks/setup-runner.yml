@@ -9,5 +9,10 @@
   hosts: runner
   gather_facts: true
   roles:
-    - runner_host
+    # runner_host is entirely system configuration (apt, users, /etc, systemd)
+    # and runs as root. github_runner escalates selectively (github_runner_become)
+    # so config.sh stays unprivileged, so become is scoped to runner_host here
+    # rather than the whole play.
+    - role: runner_host
+      become: true
     - github_runner

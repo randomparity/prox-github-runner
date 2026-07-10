@@ -24,5 +24,8 @@
   hosts: runner
   gather_facts: true
   roles:
-    - runner_host
+    # become is scoped to runner_host (all system config); github_runner
+    # escalates selectively so config.sh stays unprivileged.
+    - role: runner_host
+      become: true
     - github_runner

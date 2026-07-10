@@ -140,6 +140,8 @@
     path: "{{ github_runner_jobs_dir }}"
     state: directory
     mode: "0755"
+    owner: "{{ runner_bootstrap_user }}"
+    group: "{{ runner_bootstrap_user }}"
   become: "{{ github_runner_become | bool }}"
   when: github_runner_apply_system | bool
 

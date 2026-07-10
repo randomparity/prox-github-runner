@@ -75,6 +75,18 @@ def test_baseline_declares_clang_python312_tauri_and_sudo(tmp_path: Path) -> Non
     assert "NOPASSWD:ALL" in sudoers
 
 
+def test_qemu_guest_agent_installed_and_enabled(tmp_path: Path) -> None:
+    # The QEMU guest agent gives Proxmox control/visibility into the running VM
+    # (IP reporting, graceful shutdown, fs-freeze). Install it in the guest and
+    # enable the service; the template already sets agent enabled=1 host-side.
+    proc = run_runner_host(tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    defaults = Path("roles/runner_host/defaults/main.yml").read_text()
+    assert "qemu-guest-agent" in defaults
+    tasks = Path("roles/runner_host/tasks/main.yml").read_text()
+    assert "qemu-guest-agent" in tasks
+
+
 def test_docker_install_and_group(tmp_path: Path) -> None:
     proc = run_runner_host(tmp_path)
     assert proc.returncode == 0, proc.stdout
