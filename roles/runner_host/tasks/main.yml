@@ -99,3 +99,28 @@
     mode: "0644"
   loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
   when: runner_host_apply_system | bool
+
+- name: Install the public-repo guard script
+  ansible.builtin.copy:
+    src: prox-github-runner-guard.sh
+    dest: "{{ runner_host_guard_script }}"
+    mode: "0755"
+  when: runner_host_apply_system | bool
+
+- name: Install the guard systemd service and timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - prox-github-runner-guard.service
+    - prox-github-runner-guard.timer
+  when: runner_host_apply_system | bool
+
+- name: Enable and start the guard timer
+  ansible.builtin.systemd:
+    name: prox-github-runner-guard.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: runner_host_apply_system | bool

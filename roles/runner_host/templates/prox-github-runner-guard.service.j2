@@ -1,0 +1,12 @@
+{{ ansible_managed | comment }}
+[Unit]
+Description=prox-github-runner public-repo guard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=GUARD_REPO={{ github_runner_target_repo }}
+Environment=GUARD_API_BASE={{ github_api_base_url }}
+Environment=GUARD_STATE_DIR={{ runner_host_state_dir }}
+ExecStart={{ runner_host_guard_script }}
