@@ -36,7 +36,12 @@
   when:
     - proxmox_vm_status.rc == 0
     - proxmox_vm_config.stdout is defined
-    - "'bridge=' ~ proxmox_template_bridge not in proxmox_vm_config.stdout"
+    # Delimited match (negative lookahead) so a prefix name does not false-match:
+    # desired vmbr0 must NOT satisfy an existing bridge=vmbr01. Fail when the
+    # desired bridge is absent as a whole token.
+    - >-
+      proxmox_vm_config.stdout is not
+      search('bridge=' ~ proxmox_template_bridge ~ '(?![0-9A-Za-z])')
 
 - name: Clone runner VM from template
   ansible.builtin.command:
@@ -56,7 +61,11 @@
 # applies the .fw rules (rendered below with [OPTIONS] enable: 1) to a NIC that
 # carries it. Precondition: the datacenter firewall must also be enabled on the
 # Proxmox node, or no VM firewall rules take effect. The bridge is unchanged, so
-# this does not trip the identity-change guard above.
+# this does not trip the identity-change guard above. On a FRESH clone this runs
+# before first boot, so the flag is active at start. On an already-running VM
+# (upgrade path) enabling the flag needs a reboot/NIC replug to take effect; the
+# role does not force a reboot (it would cancel running jobs) — reboot the VM
+# manually to activate isolation. See spec Amendment 4.
 - name: Converge network interface (enables VM firewall on net0)
   ansible.builtin.command:
     argv: ["qm", "set", "{{ runner_vm_id }}", "--net0", "{{ proxmox_vm_net0 }}"]

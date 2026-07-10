@@ -86,6 +86,13 @@ case "$mode:$1" in
     ;;
   existing:set) exit 0 ;;
   existing:start) exit 0 ;;
+  existing-vmbr01:status) exit 0 ;;
+  existing-vmbr01:config)
+    printf 'name: paper-archives-runner\n'
+    printf 'net0: virtio,bridge=vmbr01,firewall=1\n'
+    printf 'scsi0: local-lvm:vm-2100-disk-0,size=256G\n'
+    ;;
+  existing-vmbr01:set) exit 0 ;;
   *) echo "unexpected qm $*" >&2; exit 42 ;;
 esac
 """
@@ -118,6 +125,20 @@ def test_identity_change_fails_when_existing(tmp_path: Path) -> None:
         tmp_path,
         {"runner_vm_ip": "192.168.20.50", "proxmox_template_bridge": "vmbr9"},
         env_extra={"FAKE_QM_LOG": str(log), "FAKE_QM_MODE": "existing"},
+    )
+    assert proc.returncode != 0
+    assert "identity change" in proc.stdout.lower()
+
+
+def test_identity_guard_fires_on_prefix_collision_bridge(tmp_path: Path) -> None:
+    # Desired bridge vmbr0 must NOT be treated as present when the existing VM is
+    # on vmbr01 (substring collision). The delimited guard must fire.
+    write_fake_qm(tmp_path, "existing-vmbr01")
+    log = tmp_path / "qm.log"
+    proc = run_role(
+        tmp_path,
+        {"runner_vm_ip": "192.168.20.50", "proxmox_template_bridge": "vmbr0"},
+        env_extra={"FAKE_QM_LOG": str(log), "FAKE_QM_MODE": "existing-vmbr01"},
     )
     assert proc.returncode != 0
     assert "identity change" in proc.stdout.lower()
