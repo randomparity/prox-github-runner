@@ -11,7 +11,8 @@
 ## Global Constraints
 
 - Target repo: `github_runner_target_repo` = `drc-dot-nz/paper-archives`; required label `paper-archives`; label set `self-hosted,linux,x64,paper-archives` (from `inventory/group_vars/all/vars.yml`, verbatim).
-- Private-repo-only. Every GitHub-changing playbook (`site.yml`, `setup-runner.yml`, `unregister-runner.yml`) must invoke the existing `preflight` role before any registration/token request.
+- Private-repo-only. Every **registration** playbook (`site.yml`, `setup-runner.yml`) must invoke the existing `preflight` role before any registration/token request. `unregister-runner.yml` **intentionally skips preflight** so a now-public or compromised repo's runner can still be torn down (unregister is not one of the spec's three enforcement layers).
+- Every per-task commit must already be `ansible-lint`/`yamllint` clean (`make check` green); the per-sprint lint sweeps (Tasks 3.5/4.6/5.5) are a final verification, not the first point of cleanliness.
 - Reruns are non-destructive: never delete/rebuild the VM by default; grow-only disk; identity changes (IP, bridge, VLAN, template) fail when the VM exists.
 - Runner auto-update disabled at registration (`--disableupdate`).
 - The GitHub PAT is never written to persistent runner config; only short-lived registration/removal tokens touch the VM, and only transiently.
@@ -383,7 +384,7 @@ def test_firewall_denies_cidrs_and_allows_egress_hosts(tmp_path: Path) -> None:
         assert host in body                       # Amendment-4 allow rules present
 ```
 
-- [ ] **Step 2: Run to verify fail** — `.venv/bin/pytest tests/test_proxmox_vm_role.py::test_firewall_denies_management_cidrs -v` → FAIL.
+- [ ] **Step 2: Run to verify fail** — `.venv/bin/pytest tests/test_proxmox_vm_role.py::test_firewall_denies_cidrs_and_allows_egress_hosts -v` → FAIL.
 
 - [ ] **Step 3: Implement** — add defaults and a `template` task that renders the rules file and a `qm set --firewall 1` command. Defaults:
 
@@ -643,7 +644,7 @@ def test_guard_noop_on_404(tmp_path):
 
 - [ ] **Step 1: Failing test** — a local HTTP server serves a runner tarball that **contains executable fake `config.sh` and `svc.sh`** (each logs its args to `$FAKE_RUNNER_LOG`); the role downloads it and fails on checksum mismatch (mirror the `test_proxmox_template_role.py` HTTP-server pattern). Assert the fakes land in each `svc-<index>` after unpack.
 - [ ] **Step 2: Fail.**
-- [ ] **Step 3: Implement** `get_url` with `checksum: "sha256:{{ github_runner_sha256 }}"`, unpack into each `svc-<index>` (so `svc-<index>/config.sh` and `svc.sh` exist for the register step).
+- [ ] **Step 3: Implement** — create each `svc-<index>` dir (`ansible.builtin.file`), `get_url` the tarball once to a temp path with `checksum: "sha256:{{ github_runner_sha256 }}"` (get_url verifies but does not extract), then `ansible.builtin.unarchive` (`remote_src: true`) into each `svc-<index>` so `svc-<index>/config.sh` and `svc.sh` exist for the register step.
 - [ ] **Step 4: Pass.**
 - [ ] **Step 5: Commit** `feat(github_runner): download and verify pinned runner package`.
 
