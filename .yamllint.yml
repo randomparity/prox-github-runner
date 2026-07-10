@@ -21,3 +21,5 @@ rules:
     forbid-explicit-octal: true
   truthy:
     allowed-values: ["true", "false"]
+    # GitHub Actions workflows use the bare `on:` trigger key.
+    check-keys: false
