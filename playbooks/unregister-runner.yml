@@ -1,0 +1,14 @@
+---
+# Tear down or scale down runner services. This playbook INTENTIONALLY skips
+# preflight: a now-public or compromised repository's runner must still be
+# tearable down (unregister is not one of the design's enforcement layers).
+# Reconciles the discovered services down to github_runner_count; pass
+# github_runner_count=0 for a full teardown.
+- name: Unregister runner services (skips preflight by design)
+  hosts: runner
+  gather_facts: false
+  tasks:
+    - name: Reconcile runner services to the target count
+      ansible.builtin.include_role:
+        name: github_runner
+        tasks_from: unregister.yml

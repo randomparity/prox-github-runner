@@ -1,0 +1,68 @@
+---
+# Idempotent unregister with scale-down reconciliation.
+#
+# Enumerates the DISCOVERED svc-* service directories (not the inventory count),
+# selects those whose index exceeds github_runner_count, deregisters each from
+# GitHub with a short-lived removal token, uninstalls its systemd unit, and
+# removes its directory. Missing state is a no-op, so the play is safe to run
+# twice (a second pass finds no surplus and reports changed=0). Full teardown
+# is a scale-down to zero: run with github_runner_count=0.
+- name: Discover runner service directories
+  ansible.builtin.find:
+    paths: "{{ github_runner_install_root }}"
+    patterns: "svc-*"
+    file_type: directory
+  register: github_runner_discovered
+
+- name: Select surplus service indices beyond the target count
+  ansible.builtin.set_fact:
+    github_runner_surplus_indices: >-
+      {{ github_runner_discovered.files | map(attribute='path') | map('basename')
+         | select('match', 'svc-[0-9]+$')
+         | map('regex_replace', '^svc-', '') | map('int')
+         | select('gt', github_runner_count | int) | list }}
+
+- name: Request a short-lived runner removal token
+  ansible.builtin.command:
+    argv:
+      - gh
+      - api
+      - --method
+      - POST
+      - -H
+      - "Accept: application/vnd.github+json"
+      - "/repos/{{ github_runner_target_repo }}/actions/runners/remove-token"
+  environment:
+    GH_TOKEN: "{{ vault_github_pat | default('') }}"
+  register: github_runner_remove_token_result
+  changed_when: false
+  no_log: true
+  when: github_runner_surplus_indices | length > 0
+
+- name: Extract the removal token into a transient fact
+  ansible.builtin.set_fact:
+    github_runner_remove_token: "{{ (github_runner_remove_token_result.stdout | from_json).token }}"
+  no_log: true
+  when: github_runner_surplus_indices | length > 0
+
+- name: Uninstall each surplus runner service unit
+  ansible.builtin.command:
+    chdir: "{{ github_runner_install_root }}/svc-{{ item }}"
+    argv: ["./svc.sh", "uninstall"]
+  become: "{{ github_runner_become | bool }}"
+  loop: "{{ github_runner_surplus_indices }}"
+  changed_when: true
+
+- name: Deregister each surplus runner service from GitHub
+  ansible.builtin.command:
+    chdir: "{{ github_runner_install_root }}/svc-{{ item }}"
+    argv: ["./config.sh", "remove", "--token", "{{ github_runner_remove_token }}"]
+  loop: "{{ github_runner_surplus_indices }}"
+  changed_when: true
+  no_log: true
+
+- name: Remove each surplus runner service directory
+  ansible.builtin.file:
+    path: "{{ github_runner_install_root }}/svc-{{ item }}"
+    state: absent
+  loop: "{{ github_runner_surplus_indices }}"
