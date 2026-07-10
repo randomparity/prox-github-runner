@@ -93,7 +93,7 @@
       ansible.builtin.set_fact:
         health_surplus_active: >-
           {{ health_service_state.results | selectattr('stdout', 'defined')
-             | selectattr('stdout', 'match', 'active')
+             | selectattr('stdout', 'search', '^active$')
              | map(attribute='item') | map('int')
              | select('gt', health_target_count | int) | list }}
 

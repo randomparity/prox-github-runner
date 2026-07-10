@@ -50,25 +50,22 @@
   when: proxmox_vm_status.rc != 0
   changed_when: true
 
-- name: Converge CPU and memory
+# One `qm set` converges CPU, memory, and net0. The ,firewall=1 flag on net0 is
+# what activates per-VM filtering: Proxmox only applies the .fw rules (rendered
+# below with [OPTIONS] enable: 1) to a NIC that carries it. Precondition: the
+# datacenter firewall must also be enabled on the Proxmox node, or no VM firewall
+# rules take effect. The bridge is unchanged, so this does not trip the
+# identity-change guard above. On a FRESH clone this runs before first boot, so
+# the flag is active at start. On an already-running VM (upgrade path) enabling
+# the flag needs a reboot/NIC replug to take effect; the role does not force a
+# reboot (it would cancel running jobs) — reboot the VM manually to activate
+# isolation. See spec Amendment 4.
+- name: Converge CPU, memory, and network interface (enables VM firewall)
   ansible.builtin.command:
     argv: ["qm", "set", "{{ runner_vm_id }}",
            "--cores", "{{ proxmox_vm_cpu }}",
-           "--memory", "{{ proxmox_vm_memory_mb }}"]
-  changed_when: true
-
-# The ,firewall=1 flag on net0 is what activates per-VM filtering: Proxmox only
-# applies the .fw rules (rendered below with [OPTIONS] enable: 1) to a NIC that
-# carries it. Precondition: the datacenter firewall must also be enabled on the
-# Proxmox node, or no VM firewall rules take effect. The bridge is unchanged, so
-# this does not trip the identity-change guard above. On a FRESH clone this runs
-# before first boot, so the flag is active at start. On an already-running VM
-# (upgrade path) enabling the flag needs a reboot/NIC replug to take effect; the
-# role does not force a reboot (it would cancel running jobs) — reboot the VM
-# manually to activate isolation. See spec Amendment 4.
-- name: Converge network interface (enables VM firewall on net0)
-  ansible.builtin.command:
-    argv: ["qm", "set", "{{ runner_vm_id }}", "--net0", "{{ proxmox_vm_net0 }}"]
+           "--memory", "{{ proxmox_vm_memory_mb }}",
+           "--net0", "{{ proxmox_vm_net0 }}"]
   changed_when: true
 
 - name: Grow boot disk (grow-only)
