@@ -38,7 +38,6 @@
   changed_when: false
   no_log: true
   delegate_to: localhost
-  run_once: true
   when: github_runner_surplus_indices | length > 0
 
 - name: Extract the removal token into a transient fact
