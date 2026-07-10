@@ -4,9 +4,12 @@ proxmox_vm_memory_mb: 32768
 proxmox_vm_disk_gb: 256
 proxmox_vm_vlan: "{{ proxmox_template_vlan | default(none) }}"
 proxmox_vm_lock_dir: "/var/lock/prox-github-runner-vm-{{ runner_vm_id }}.lock"
+# The ,firewall=1 NIC flag is what makes Proxmox apply the VM firewall (and thus
+# the .fw OUT REJECT deny-CIDR rules) to this interface; without it net0 traffic
+# is unfiltered even when the .fw file has [OPTIONS] enable: 1.
 proxmox_vm_net0: >-
   virtio,bridge={{ proxmox_template_bridge }}{%- if proxmox_vm_vlan is not none -%}
-  ,tag={{ proxmox_vm_vlan }}{%- endif -%}
+  ,tag={{ proxmox_vm_vlan }}{%- endif -%},firewall=1
 proxmox_vm_wait_for_ssh: true   # tests set false to skip the live SSH/cloud-init waits
 proxmox_vm_fw_rules_path: "/etc/pve/firewall/{{ runner_vm_id }}.fw"
 proxmox_vm_denied_cidrs:

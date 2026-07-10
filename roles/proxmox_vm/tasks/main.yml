@@ -52,6 +52,16 @@
            "--memory", "{{ proxmox_vm_memory_mb }}"]
   changed_when: true
 
+# The ,firewall=1 flag on net0 is what activates per-VM filtering: Proxmox only
+# applies the .fw rules (rendered below with [OPTIONS] enable: 1) to a NIC that
+# carries it. Precondition: the datacenter firewall must also be enabled on the
+# Proxmox node, or no VM firewall rules take effect. The bridge is unchanged, so
+# this does not trip the identity-change guard above.
+- name: Converge network interface (enables VM firewall on net0)
+  ansible.builtin.command:
+    argv: ["qm", "set", "{{ runner_vm_id }}", "--net0", "{{ proxmox_vm_net0 }}"]
+  changed_when: true
+
 - name: Grow boot disk (grow-only)
   ansible.builtin.command:
     argv: ["qm", "resize", "{{ runner_vm_id }}", "scsi0", "{{ proxmox_vm_disk_gb }}G"]
@@ -63,11 +73,6 @@
     src: firewall.fw.j2
     dest: "{{ proxmox_vm_fw_rules_path }}"
     mode: "0640"
-
-- name: Enable the Proxmox firewall on the runner VM
-  ansible.builtin.command:
-    argv: ["qm", "set", "{{ runner_vm_id }}", "--firewall", "1"]
-  changed_when: true
 
 - name: Start runner VM
   ansible.builtin.command:

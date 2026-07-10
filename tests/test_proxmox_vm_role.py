@@ -132,7 +132,16 @@ def test_firewall_denies_cidrs_default_allow_hosts_are_comments(tmp_path: Path) 
         env_extra={"FAKE_QM_LOG": str(log), "FAKE_QM_MODE": "existing"},
     )
     assert proc.returncode == 0, proc.stdout
-    assert "--firewall 1" in log.read_text()
+
+    # VM firewall is activated by the net0 `firewall=1` NIC flag plus the .fw
+    # `[OPTIONS] enable: 1`; `qm set --firewall 1` is not a valid qm option and
+    # must never be emitted.
+    qm_log = log.read_text()
+    net0_sets = [line for line in qm_log.splitlines() if "--net0" in line]
+    assert net0_sets, "no `qm set --net0` converge was logged"
+    assert all("firewall=1" in line for line in net0_sets)
+    assert "--firewall 1" not in qm_log
+
     body = (tmp_path / "fw.rules").read_text()
     lines = body.splitlines()
 

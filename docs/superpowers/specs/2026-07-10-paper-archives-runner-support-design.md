@@ -191,6 +191,13 @@ at this layer is those denies, not the positive host allowlist. An earlier
 draft rendered an unscoped `OUT ACCEPT` per host, which matched all traffic and
 silently shadowed both the denies and a `policy_out: DROP` — that is removed.
 
+**Activation preconditions.** Per-VM filtering is active only when the NIC
+carries `firewall=1` (the role appends it to `net0`) *and* the `.fw` file has
+`[OPTIONS] enable: 1`; both together enable the VM firewall — `qm set
+--firewall 1` is not a valid option. As a host precondition, the datacenter
+firewall must also be enabled on the Proxmox node, or no VM firewall rules take
+effect.
+
 The positive host list below is retained as **documentation only** (rendered as
 `#` comments in the generated `.fw` file): it records the destinations the
 runner needs for CI so an operator who fronts the VM with an upstream egress
