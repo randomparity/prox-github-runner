@@ -17,7 +17,7 @@ def test_ubuntu_cloud_image_uses_current_url_with_pinned_checksum() -> None:
     )
     assert (
         data["proxmox_template_cloud_image_checksum"]
-        == "sha256:6e7016f2c9f4d3c00f48789eb6b9043ba2172ccc1b6b1eaf3ed1e29dd3e52bb3"
+        == "sha256:5fa5b05e5ec239858c4531485d6023b0896448c2df7c63b34f8dae6ea6051a44"
     )
 
 
