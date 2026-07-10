@@ -1,0 +1,111 @@
+---
+# Dispatch the self-hosted smoke workflow and poll it to a conclusion.
+#
+# Operator convenience wrapper around templates/paper-archives-smoke.yml (once
+# it has been copied into the repository as .github/workflows/<smoke_workflow>).
+# It triggers the workflow_dispatch event, finds the resulting run, waits for it
+# to complete, and fails if the run did not succeed. If the workflow is not
+# present in the repository it reports that and exits cleanly (nothing to do).
+- name: Run the self-hosted runner smoke workflow
+  hosts: runner
+  gather_facts: false
+  vars:
+    smoke_repo: "{{ github_runner_target_repo }}"
+    smoke_workflow: "smoke.yml"
+    smoke_ref: "main"
+    smoke_poll_retries: 60
+    smoke_poll_delay: 10
+  tasks:
+    - name: Look up the smoke workflow in the repository
+      ansible.builtin.command:
+        argv:
+          - gh
+          - api
+          - "/repos/{{ smoke_repo }}/actions/workflows/{{ smoke_workflow }}"
+      environment:
+        GH_TOKEN: "{{ vault_github_pat | default('') }}"
+      register: smoke_lookup
+      changed_when: false
+      failed_when: false
+
+    - name: Report when the smoke workflow is not present
+      ansible.builtin.debug:
+        msg: >-
+          Smoke workflow {{ smoke_workflow }} is not present in {{ smoke_repo }};
+          nothing to dispatch. Copy templates/paper-archives-smoke.yml into the
+          repository first (see docs/smoke-workflow.md).
+      when: smoke_lookup.rc != 0
+
+    - name: Dispatch and poll the smoke workflow
+      when: smoke_lookup.rc == 0
+      environment:
+        GH_TOKEN: "{{ vault_github_pat | default('') }}"
+      block:
+        - name: Dispatch the smoke workflow
+          ansible.builtin.command:
+            argv:
+              - gh
+              - workflow
+              - run
+              - "{{ smoke_workflow }}"
+              - --repo
+              - "{{ smoke_repo }}"
+              - --ref
+              - "{{ smoke_ref }}"
+          changed_when: true
+
+        - name: Find the dispatched run
+          ansible.builtin.command:
+            argv:
+              - gh
+              - run
+              - list
+              - --workflow
+              - "{{ smoke_workflow }}"
+              - --repo
+              - "{{ smoke_repo }}"
+              - --event
+              - workflow_dispatch
+              - --limit
+              - "1"
+              - --json
+              - databaseId,status,conclusion
+          register: smoke_run_list
+          changed_when: false
+          retries: "{{ smoke_poll_retries | int }}"
+          delay: "{{ smoke_poll_delay | int }}"
+          until: (smoke_run_list.stdout | from_json | length) > 0
+
+        - name: Record the dispatched run id
+          ansible.builtin.set_fact:
+            smoke_run_id: "{{ (smoke_run_list.stdout | from_json)[0].databaseId }}"
+
+        - name: Poll the smoke run until it completes
+          ansible.builtin.command:
+            argv:
+              - gh
+              - run
+              - view
+              - "{{ smoke_run_id }}"
+              - --repo
+              - "{{ smoke_repo }}"
+              - --json
+              - status,conclusion
+          register: smoke_run_view
+          changed_when: false
+          retries: "{{ smoke_poll_retries | int }}"
+          delay: "{{ smoke_poll_delay | int }}"
+          until: (smoke_run_view.stdout | from_json).status == "completed"
+
+        - name: Fail when the smoke run did not succeed
+          ansible.builtin.fail:
+            msg: >-
+              Smoke run {{ smoke_run_id }} concluded
+              '{{ (smoke_run_view.stdout | from_json).conclusion }}'
+              (expected 'success').
+          when: (smoke_run_view.stdout | from_json).conclusion != "success"
+
+        - name: Report smoke success
+          ansible.builtin.debug:
+            msg: "Smoke run {{ smoke_run_id }} succeeded."
+          when: (smoke_run_view.stdout | from_json).conclusion == "success"
