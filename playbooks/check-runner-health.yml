@@ -1,0 +1,156 @@
+---
+# Report runner health and enforce definitive repository safety.
+#
+# The second of the design's two stop actors (alongside the guard timer): on a
+# DEFINITIVE unsafe signal (the target repository is confirmed public) it stops
+# every runner service with the same systemctl-stop primitive the guard uses,
+# then fails. Non-definitive problems (offline service, disk pressure, a job
+# past the scheduling-latency threshold, unavailable Docker) are reported as
+# warnings and do not fail the run.
+- name: Check runner health and enforce definitive repository safety
+  hosts: runner
+  gather_facts: false
+  vars:
+    health_latency_seconds: 600
+    health_disk_warn_pct: 80
+    health_disk_crit_pct: 90
+    health_unit_glob: "actions.runner.*"
+    health_install_root: "{{ github_runner_install_root | default('/opt/actions-runner') }}"
+    health_state_dir: "{{ github_runner_state_dir | default('/run/prox-github-runner') }}"
+    health_jobs_dir: "{{ github_runner_jobs_dir | default(health_state_dir ~ '/jobs') }}"
+    health_name_prefix: "{{ github_runner_name_prefix | default(runner_vm_name) }}"
+    health_become: "{{ github_runner_become | default(true) }}"
+    health_repo_slug: "{{ github_runner_target_repo | replace('/', '-') }}"
+    health_unit_base: "actions.runner.{{ health_repo_slug }}.{{ health_name_prefix }}"
+  tasks:
+    - name: Query target repository privacy
+      ansible.builtin.command:
+        argv:
+          - gh
+          - api
+          - -H
+          - "Accept: application/vnd.github+json"
+          - "/repos/{{ github_runner_target_repo }}"
+      environment:
+        GH_TOKEN: "{{ vault_github_pat | default('') }}"
+      register: health_repo_result
+      changed_when: false
+      failed_when: false
+
+    - name: Determine definitive-unsafe (confirmed public) repository state
+      ansible.builtin.set_fact:
+        health_repo_public: >-
+          {{ health_repo_result.rc == 0
+             and ((health_repo_result.stdout | default('{}') | from_json).private
+                  | default(true)) == false }}
+
+    - name: Discover runner service directories
+      ansible.builtin.find:
+        paths: "{{ health_install_root }}"
+        patterns: "svc-*"
+        file_type: directory
+      register: health_discovered
+
+    - name: Collect discovered service indices
+      ansible.builtin.set_fact:
+        health_indices: >-
+          {{ health_discovered.files | map(attribute='path') | map('basename')
+             | select('match', 'svc-[0-9]+$')
+             | map('regex_replace', '^svc-', '') | map('int') | sort | list }}
+
+    - name: Query each runner service state
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-active
+          - "{{ health_unit_base }}-{{ item }}.service"
+      loop: "{{ health_indices }}"
+      register: health_service_state
+      changed_when: false
+      failed_when: false
+
+    - name: Report each runner service state
+      ansible.builtin.debug:
+        msg: "svc-{{ item.item }} state: {{ item.stdout | default('unknown') | trim }}"
+      loop: "{{ health_service_state.results }}"
+      loop_control:
+        label: "svc-{{ item.item }}"
+
+    - name: Identify offline services
+      ansible.builtin.set_fact:
+        health_offline: >-
+          {{ health_service_state.results | selectattr('stdout', 'defined')
+             | map(attribute='stdout') | map('trim')
+             | reject('equalto', 'active') | list }}
+
+    - name: Find job markers older than the scheduling-latency threshold
+      ansible.builtin.find:
+        paths: "{{ health_jobs_dir }}"
+        file_type: file
+        age: "{{ health_latency_seconds // 60 }}m"
+      register: health_stale_markers
+
+    - name: Check Docker daemon health
+      ansible.builtin.command:
+        argv: ["docker", "info"]
+      register: health_docker
+      changed_when: false
+      failed_when: false
+
+    - name: Read disk usage for the install root
+      ansible.builtin.command:
+        argv: ["df", "-P", "{{ health_install_root }}"]
+      register: health_df
+      changed_when: false
+
+    - name: Compute peak disk usage percent
+      ansible.builtin.set_fact:
+        health_disk_pct: >-
+          {{ ((health_df.stdout | regex_findall('([0-9]+)%') | map('int') | list) or [0]) | max }}
+
+    - name: Report the guard soft-failure counter when present
+      ansible.builtin.slurp:
+        src: "{{ health_state_dir }}/guard.soft"
+      register: health_guard_soft
+      when: (health_state_dir ~ '/guard.soft') is exists
+      changed_when: false
+
+    - name: Show the guard soft-failure counter
+      ansible.builtin.debug:
+        msg: "guard soft-failure counter: {{ health_guard_soft.content | b64decode | trim }}"
+      when: health_guard_soft.content is defined
+
+    - name: Assemble health warnings
+      ansible.builtin.set_fact:
+        health_warnings: >-
+          {{ (['services offline: ' ~ (health_offline | join(', '))]
+              if health_offline | length > 0 else [])
+             + (['scheduling latency: ' ~ health_stale_markers.matched
+                 ~ ' job(s) past the ' ~ health_latency_seconds ~ 's threshold']
+                if health_stale_markers.matched > 0 else [])
+             + (['disk usage critical: ' ~ health_disk_pct ~ '%']
+                if health_disk_pct | int >= health_disk_crit_pct else [])
+             + (['disk usage high: ' ~ health_disk_pct ~ '%']
+                if (health_disk_pct | int >= health_disk_warn_pct
+                    and health_disk_pct | int < health_disk_crit_pct) else [])
+             + (['docker daemon unavailable']
+                if health_docker.rc != 0 else []) }}
+
+    - name: Report health warnings
+      ansible.builtin.debug:
+        msg: "HEALTH WARNING: {{ item }}"
+      loop: "{{ health_warnings }}"
+
+    - name: Stop all runner services on definitive-unsafe repository state
+      ansible.builtin.command:
+        argv: ["systemctl", "stop", "{{ health_unit_glob }}"]
+      become: "{{ health_become | bool }}"
+      when: health_repo_public | bool
+      changed_when: true
+
+    - name: Fail on definitive-unsafe repository state
+      ansible.builtin.fail:
+        msg: >-
+          Target repository {{ github_runner_target_repo }} is PUBLIC.
+          All runner services have been stopped; investigate before re-enabling.
+      when: health_repo_public | bool
