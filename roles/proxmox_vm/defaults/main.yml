@@ -20,9 +20,9 @@ proxmox_vm_net0_mac: >-
 # the .fw OUT REJECT deny-CIDR rules) to this interface; without it net0 traffic
 # is unfiltered even when the .fw file has [OPTIONS] enable: 1.
 proxmox_vm_net0: >-
-  virtio={{ proxmox_vm_net0_mac }},bridge={{ proxmox_template_bridge }}
-  {%- if proxmox_vm_vlan is not none -%},tag={{ proxmox_vm_vlan }}{%- endif -%}
-  ,firewall=1
+  virtio={{ proxmox_vm_net0_mac }},bridge={{ proxmox_template_bridge
+  }}{%- if proxmox_vm_vlan is not none -%},tag={{ proxmox_vm_vlan
+  }}{%- endif -%},firewall=1
 proxmox_vm_wait_for_ssh: true   # tests set false to skip the live SSH/cloud-init waits
 
 # SSH public key injected into the runner VM via cloud-init so Ansible can reach

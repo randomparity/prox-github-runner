@@ -1,0 +1,15 @@
+---
+# Site "cae": the gamera Proxmox host and its pa-runner VM. Values here are
+# PLACEHOLDERS. Override the real ones in the gitignored
+# inventory/group_vars/site_cae/vars_local.yml, loaded after this file.
+# github_runner_name_prefix keeps this VM's runner registrations distinct from
+# the pdx site's when both target the same repository.
+proxmox_api_host: "192.0.2.20"
+proxmox_node: "pve"
+runner_vm_id: 2200
+runner_vm_name: "paper-archives-runner"
+runner_vm_ip: "192.0.2.60"
+runner_vm_gateway: "192.0.2.1"
+runner_vm_nameserver: "192.0.2.1"
+runner_vm_searchdomain: "example.test"
+github_runner_name_prefix: "paper-archives-runner-cae"

@@ -33,17 +33,9 @@ github_preflight_allow_dynamic_workflows: []
 github_preflight_local_action_paths:
   - ".github/actions/**"
 
-# Site-specific runner VM identity. The values below are PLACEHOLDERS (RFC 5737
-# documentation range). Override the real ones in a gitignored local file,
-# inventory/group_vars/all/vars_local.yml, which Ansible loads after this file.
-# VM ID convention: last two octets of the runner IP (e.g. x.x.2.99 -> 299).
-runner_vm_id: 2100
-runner_vm_name: "paper-archives-runner"
-runner_vm_ip: "192.0.2.50"
-runner_vm_gateway: "192.0.2.1"
+# Shared runner-VM settings (identical across sites). Per-site identity
+# (id/name/ip/gateway/nameserver/searchdomain) lives in group_vars/site_*.
 runner_vm_cidr: 24
-runner_vm_nameserver: "192.0.2.1"
-runner_vm_searchdomain: "example.test"
 runner_bootstrap_user: "runner"
 
 # Proxmox VM egress denies (Amendment 4). Deny the hypervisor management
