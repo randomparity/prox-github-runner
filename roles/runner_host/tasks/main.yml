@@ -125,6 +125,24 @@
   loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
   when: runner_host_apply_system | bool
 
+# /run is tmpfs: a directory created once at converge time is wiped on reboot.
+# Declare the runtime tree via tmpfiles.d so systemd recreates it on every boot
+# with the jobs subdir owned by the runner user. Without this the unprivileged
+# Pre Job Hook cannot create its marker under the root-owned parent and every
+# job fails at "Set up runner".
+- name: Install the runtime-directory tmpfiles rule
+  ansible.builtin.template:
+    src: prox-github-runner-tmpfiles.conf.j2
+    dest: "{{ runner_host_tmpfiles_path }}"
+    mode: "0644"
+  when: runner_host_apply_system | bool
+
+- name: Materialize the runtime tree now (idempotent, also runs on boot)
+  ansible.builtin.command:
+    argv: ["systemd-tmpfiles", "--create", "{{ runner_host_tmpfiles_path }}"]
+  changed_when: false
+  when: runner_host_apply_system | bool
+
 - name: Install the guard and cleanup scripts
   ansible.builtin.copy:
     src: "{{ item.src }}"
