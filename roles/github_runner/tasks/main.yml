@@ -152,6 +152,7 @@
     dest: "{{ github_runner_install_root }}/svc-{{ item }}/.env"
     mode: "0644"
   loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+  notify: Restart runner services
 
 - name: Start each runner service
   ansible.builtin.command:

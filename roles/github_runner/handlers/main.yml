@@ -1,0 +1,16 @@
+---
+# The Actions runner reads its .env only at process start, so a changed .env
+# (e.g. the per-service RUSTUP_HOME) must be followed by a restart or the running
+# job listeners keep the stale environment. Gated on apply_system so role tests
+# (which write fake .env files but have no real units) never restart anything.
+- name: Restart runner services
+  ansible.builtin.systemd:
+    name: >-
+      actions.runner.{{ github_runner_target_repo | replace('/', '-') }}.{{
+      github_runner_name_prefix }}-{{ item }}.service
+    state: restarted
+  become: "{{ github_runner_become | bool }}"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+  loop_control:
+    label: "svc-{{ item }}"
+  when: github_runner_apply_system | bool
