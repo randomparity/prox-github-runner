@@ -8,7 +8,6 @@ runner_host_home: "/home/{{ runner_host_user }}"
 # Shared on-disk contract from inventory/group_vars/all/vars.yml (single source
 # of truth shared with github_runner and check-runner-health).
 runner_host_install_root: "{{ runner_install_root }}"
-runner_host_env_dir: /etc/prox-github-runner
 runner_host_bin_dir: "{{ runner_bin_dir }}"
 runner_host_state_dir: "{{ runner_state_dir }}"
 runner_host_jobs_dir: "{{ runner_jobs_dir }}"

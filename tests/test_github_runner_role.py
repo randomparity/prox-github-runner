@@ -258,6 +258,14 @@ def test_registers_three_unique_labeled_services_with_hooks(tmp_path: Path) -> N
     assert "ACTIONS_RUNNER_HOOK_JOB_COMPLETED=" in env_body
     # Per-service marker path derives from the configured jobs dir (runner_jobs_dir).
     assert f"{tmp_path}/state/jobs/paper-archives-runner-1" in env_body
+    # Per-service toolchain isolation must reach the JOB environment (the runner
+    # injects this .env into every job). Without an isolated RUSTUP_HOME the three
+    # services share ~/.rustup and concurrent rustup installs race, wiping rustc
+    # mid-build. The cargo registry stays shared (cargo's own locks make that safe).
+    install_root = tmp_path / "actions-runner"
+    assert f"RUSTUP_HOME={install_root}/svc-1/rustup" in env_body
+    assert f"RUNNER_TOOL_CACHE={install_root}/svc-1/_tool" in env_body
+    assert "CARGO_HOME=/home/runner/.cargo" in env_body
 
 
 def _place_registered_service(install_root: Path, idx: int) -> None:

@@ -96,11 +96,14 @@ def test_docker_install_and_group(tmp_path: Path) -> None:
     assert "ansible.builtin.systemd" in tasks
 
 
-def test_per_service_env_isolation(tmp_path: Path) -> None:
+def test_per_service_dir_isolation(tmp_path: Path) -> None:
     proc = run_runner_host(tmp_path, overrides={"github_runner_count": 3})
     assert proc.returncode == 0, proc.stdout
     tasks = Path("roles/runner_host/tasks/main.yml").read_text()
     assert "range(1, (github_runner_count | int) + 1)" in tasks
-    env_tmpl = Path("roles/runner_host/templates/runner-env.j2").read_text()
-    assert "RUSTUP_HOME=" in env_tmpl and "rustup" in env_tmpl
-    assert "CARGO_HOME=" in env_tmpl
+    # runner_host creates the per-service rustup + tool-cache dirs and the shared
+    # cargo registry dir. The env vars pointing jobs at them are emitted by the
+    # github_runner role's runner .env (see test_github_runner_role), not by an
+    # unwired EnvironmentFile.
+    assert "product(['_work', '_tool', 'rustup'])" in tasks
+    assert "{{ runner_host_home }}/.cargo" in tasks
