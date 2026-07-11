@@ -14,9 +14,6 @@ github_runner_install_root: "{{ runner_install_root }}"
 github_runner_bin_dir: "{{ runner_bin_dir }}"
 github_runner_state_dir: "{{ runner_state_dir }}"
 github_runner_jobs_dir: "{{ runner_jobs_dir }}"
-# Runner user home; hosts the shared cargo registry (CARGO_HOME) injected into
-# jobs via the runner .env. Matches runner_host_home.
-github_runner_home: "/home/{{ runner_bootstrap_user }}"
 
 # Runner names must be unique per repository: <vm-hostname>-<index>.
 github_runner_name_prefix: "{{ runner_vm_name }}"
