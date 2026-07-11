@@ -225,6 +225,8 @@ fi
 
 if [[ "$mode" == "pve8" ]]; then
   printf 'proxmox-ve: 8.2.0\n'
+elif [[ "$mode" == "pve9" ]]; then
+  printf 'proxmox-ve: 9.2.3\n'
 elif [[ "$mode" == "pve7" ]]; then
   printf 'proxmox-ve: 7.4.0\n'
 else
@@ -377,8 +379,41 @@ def test_pve_7_is_rejected_before_status_check(tmp_path: Path) -> None:
         env=env,
     )
     assert proc.returncode != 0
-    assert "Proxmox VE 8 is required" in proc.stdout
+    assert "Proxmox VE 8 or 9 is required" in proc.stdout
     assert not log.exists()
+
+
+def test_pve_9_is_accepted(tmp_path: Path) -> None:
+    # The target host runs PVE 9.x; the import-from disk-import syntax it protects
+    # is present in 8.2+ and unchanged in 9.x, so 9.x must pass the version gate.
+    inventory = tmp_path / "hosts.yml"
+    log = tmp_path / "qm.log"
+    write_inventory(inventory)
+    write_fake_qm(tmp_path, "existing-template")
+    write_fake_pveversion(tmp_path)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "FAKE_QM_MODE": "existing-template",
+        "FAKE_QM_LOG": str(log),
+        "FAKE_QM_STATE": str(tmp_path / "qm.state"),
+        "FAKE_PVEVERSION_MODE": "pve9",
+    }
+    proc = subprocess.run(
+        [
+            "ansible-playbook",
+            "-i",
+            str(inventory),
+            "playbooks/provision-template.yml",
+            "-e",
+            json.dumps(base_extra_vars(tmp_path)),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
 def test_template_lock_contention_fails_before_status_check(tmp_path: Path) -> None:

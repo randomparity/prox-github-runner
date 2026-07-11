@@ -36,13 +36,13 @@
       stderr={{ proxmox_template_pveversion.stderr | default('') }}.
   when: proxmox_template_pveversion.rc != 0
 
-- name: Require Proxmox VE 8 for import-from disk import
+- name: Require Proxmox VE 8 or 9 for import-from disk import
   ansible.builtin.assert:
     that:
-      - proxmox_template_pveversion.stdout is search('(?m)^proxmox-ve:\s*8\.')
+      - proxmox_template_pveversion.stdout is search('(?m)^proxmox-ve:\s*[89]\.')
     fail_msg: >-
-      Proxmox VE 8 is required because this role uses qm set
-      --scsi0 storage:0,import-from=...
+      Proxmox VE 8 or 9 is required because this role uses qm set
+      --scsi0 storage:0,import-from=... (available since PVE 8.2).
       pveversion output: {{ proxmox_template_pveversion.stdout | default('') }}
 
 - name: Generate Proxmox template lock owner token

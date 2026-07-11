@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .vault_pass*
 inventory/group_vars/**/vault.yml
+# Site-specific overrides (real IPs/hostnames); loaded after vars.yml. Ship
+# vars_local.yml.example as the template; keep the real vars_local.yml local.
+inventory/group_vars/**/vars_local.yml

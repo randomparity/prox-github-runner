@@ -6,6 +6,7 @@ import base64
 import fnmatch
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -212,8 +213,63 @@ def workflow_triggers(workflow: dict[str, Any]) -> set[str]:
     return set()
 
 
-def job_labels(job: dict[str, Any]) -> list[str]:
-    return normalize_list(job.get("runs-on"))
+RUNS_ON_MATRIX_REF = re.compile(r"^\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}$")
+
+
+def matrix_values_for_key(job: dict[str, Any], key: str) -> list[Any] | None:
+    """Collect a matrix key's statically-enumerated values (top-level + include).
+
+    Returns None when the job has no matrix values for the key, so the caller can
+    treat an unresolvable matrix reference as dynamic.
+    """
+    strategy = job.get("strategy")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    if not isinstance(matrix, dict):
+        return None
+    values: list[Any] = []
+    found = False
+    top = matrix.get(key)
+    if isinstance(top, list):
+        values.extend(top)
+        found = True
+    include = matrix.get("include")
+    if isinstance(include, list):
+        for entry in include:
+            if isinstance(entry, dict) and key in entry:
+                values.append(entry[key])
+                found = True
+    return values if found else None
+
+
+def resolve_runs_on(job: dict[str, Any]) -> tuple[list[list[str]], bool]:
+    """Resolve a job's runs-on into concrete label lists.
+
+    Returns (resolved_label_lists, is_dynamic). A ``runs-on`` that is a single
+    ``${{ matrix.<key> }}`` reference is resolved against the job's matrix so the
+    idiomatic multi-OS pattern is auditable. Any other ``${{`` expression, or a
+    matrix reference with no enumerated values, is reported as dynamic.
+    """
+    raw = job.get("runs-on")
+    if isinstance(raw, str):
+        ref = RUNS_ON_MATRIX_REF.match(raw.strip())
+        if ref:
+            values = matrix_values_for_key(job, ref.group(1))
+            if values is None:
+                return [], True
+            resolved: list[list[str]] = []
+            for value in values:
+                labels = normalize_list(value)
+                if any("${{" in str(label) for label in labels):
+                    return [], True
+                resolved.append(labels)
+            return resolved, False
+        if "${{" in raw:
+            return [], True
+        return [normalize_list(raw)], False
+    labels = normalize_list(raw)
+    if any("${{" in str(label) for label in labels):
+        return [], True
+    return ([labels] if labels else []), False
 
 
 def job_targets_self_hosted(labels: list[str], required_label: str) -> bool:
@@ -233,18 +289,23 @@ def audit_workflow_text(*, path: str, text: str, required_label: str) -> CheckRe
     for job_name, job in jobs.items():
         if not isinstance(job, dict):
             continue
-        labels = job_labels(job)
-        if not labels:
-            continue
-        if "${{" in ",".join(labels):
+        resolved, is_dynamic = resolve_runs_on(job)
+        if is_dynamic:
             errors.append(f"{path} job {job_name} uses dynamic runs-on.")
             continue
-        if job_targets_self_hosted(labels, required_label) and required_label not in labels:
+        self_hosted = False
+        missing_label = False
+        for labels in resolved:
+            if job_targets_self_hosted(labels, required_label):
+                self_hosted = True
+                if required_label not in labels:
+                    missing_label = True
+        if missing_label:
             errors.append(
                 f"{path} job {job_name} targets self-hosted runners without "
                 f"required label {required_label}."
             )
-        if job_targets_self_hosted(labels, required_label):
+        if self_hosted:
             for trigger in sorted(triggers & UNSAFE_TRIGGERS):
                 errors.append(
                     f"{path} uses unsafe trigger {trigger} on runner label {required_label}."

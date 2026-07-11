@@ -1,0 +1,6 @@
+---
+- name: Provision the runner VM
+  hosts: proxmox
+  gather_facts: false
+  roles:
+    - proxmox_vm

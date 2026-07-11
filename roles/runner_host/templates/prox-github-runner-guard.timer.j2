@@ -1,0 +1,11 @@
+{{ ansible_managed | comment }}
+[Unit]
+Description=Run the prox-github-runner public-repo guard periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec={{ runner_host_guard_interval }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

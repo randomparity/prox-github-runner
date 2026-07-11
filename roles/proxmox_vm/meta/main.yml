@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: proxmox_vm
+  author: dave
+  description: Clone and converge one runner VM on Proxmox, non-destructively.
+  license: MIT
+  min_ansible_version: "2.21"
+  platforms:
+    - name: GenericLinux
+      versions:
+        - all
+dependencies: []

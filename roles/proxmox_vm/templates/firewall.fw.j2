@@ -1,0 +1,19 @@
+{{ ansible_managed | comment }}
+[OPTIONS]
+enable: 1
+policy_out: ACCEPT
+
+[RULES]
+{% for cidr in proxmox_vm_denied_cidrs %}
+OUT REJECT -dest {{ cidr }} -log nolog # deny runner egress to {{ cidr }}
+{% endfor %}
+#
+# Allowed-egress hosts below are DOCUMENTATION ONLY and are NOT enforced here.
+# The Proxmox firewall operates at L3/L4 and cannot allowlist by hostname, so
+# this role enforces a deny-specific-CIDRs / default-allow model: the OUT REJECT
+# rules above take precedence (first match wins), everything else is permitted
+# by policy_out: ACCEPT. The list records what the runner needs for CI so an
+# operator who fronts the VM with an upstream egress proxy can allowlist there.
+{% for host in proxmox_vm_allowed_egress_hosts %}
+# allowed egress (documentation, not enforced): {{ host }}
+{% endfor %}

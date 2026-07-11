@@ -9,6 +9,18 @@ github_runner_labels:
   - x64
   - paper-archives
 
+# Number of concurrent runner services on the VM (supported range 3-4). A
+# cross-role coordination value consumed by runner_host and github_runner.
+github_runner_count: 3
+
+# Shared on-disk contract. runner_host installs into these paths and
+# github_runner + check-runner-health read from them; they MUST agree, so the
+# canonical values live here (not duplicated per role) to avoid silent drift.
+runner_install_root: /opt/actions-runner
+runner_bin_dir: /usr/local/bin
+runner_state_dir: /run/prox-github-runner
+runner_jobs_dir: "{{ runner_state_dir }}/jobs"
+
 # Placeholder date that intentionally fails until the operator sets the real
 # fine-grained PAT expiration date.
 github_pat_expires_on: "1970-01-01"
@@ -21,10 +33,23 @@ github_preflight_allow_dynamic_workflows: []
 github_preflight_local_action_paths:
   - ".github/actions/**"
 
+# Site-specific runner VM identity. The values below are PLACEHOLDERS (RFC 5737
+# documentation range). Override the real ones in a gitignored local file,
+# inventory/group_vars/all/vars_local.yml, which Ansible loads after this file.
+# VM ID convention: last two octets of the runner IP (e.g. x.x.2.99 -> 299).
 runner_vm_id: 2100
 runner_vm_name: "paper-archives-runner"
-runner_vm_ip: "192.168.20.50"
-runner_vm_gateway: "192.168.20.1"
+runner_vm_ip: "192.0.2.50"
+runner_vm_gateway: "192.0.2.1"
 runner_vm_cidr: 24
-runner_vm_nameserver: "192.168.20.1"
+runner_vm_nameserver: "192.0.2.1"
+runner_vm_searchdomain: "example.test"
 runner_bootstrap_user: "runner"
+
+# Proxmox VM egress denies (Amendment 4). Deny the hypervisor management
+# interface so a compromised job cannot reach the Proxmox API; internet egress
+# stays open under the .fw default-allow policy. On a flat LAN where the gateway
+# is also the runner's DNS, do NOT deny the whole subnet (breaks resolution) --
+# list only specific management CIDRs. Override in vars_local.yml as needed.
+proxmox_vm_denied_cidrs:
+  - "{{ proxmox_api_host }}/32"

@@ -1,0 +1,51 @@
+---
+# Gate for every OS-mutating task. Default true (real converge); tests set false
+# so the role applies cleanly on any host without touching apt/user/systemd.
+runner_host_apply_system: true
+
+runner_host_user: "{{ runner_bootstrap_user }}"
+runner_host_home: "/home/{{ runner_host_user }}"
+# Shared on-disk contract from inventory/group_vars/all/vars.yml (single source
+# of truth shared with github_runner and check-runner-health).
+runner_host_install_root: "{{ runner_install_root }}"
+runner_host_env_dir: /etc/prox-github-runner
+runner_host_bin_dir: "{{ runner_bin_dir }}"
+runner_host_state_dir: "{{ runner_state_dir }}"
+runner_host_guard_script: "{{ runner_host_bin_dir }}/prox-github-runner-guard.sh"
+runner_host_guard_interval: 15min
+runner_host_cleanup_script: "{{ runner_host_bin_dir }}/prox-github-runner-cleanup.sh"
+
+runner_host_packages:
+  - git
+  - curl
+  - jq
+  - build-essential
+  - clang
+  - python3.12
+  - python3.12-venv
+  - python3-pip
+  - ca-certificates
+  # Lets Proxmox report the guest IP and do graceful shutdown / fs-freeze; the
+  # template sets `--agent enabled=1` host-side, this provides the guest half.
+  - qemu-guest-agent
+
+# Tauri desktop-app build dependencies (Amendment 2). Pre-installed so the
+# paper-archives workflows can drop their inline apt step.
+runner_host_tauri_libs:
+  - libwebkit2gtk-4.1-dev
+  - libxdo-dev
+  - libssl-dev
+  - libayatana-appindicator3-dev
+  - librsvg2-dev
+
+runner_host_docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+runner_host_docker_gpg_url: https://download.docker.com/linux/ubuntu/gpg
+runner_host_docker_gpg_path: /etc/apt/keyrings/docker.asc
+runner_host_docker_repo_uri: https://download.docker.com/linux/ubuntu
+runner_host_docker_repo_suite: noble
+runner_host_docker_repo_component: stable

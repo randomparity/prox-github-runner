@@ -1,0 +1,45 @@
+---
+# Copyable smoke workflow for the paper-archives self-hosted runner.
+#
+# Copy this file into drc-dot-nz/paper-archives as
+# .github/workflows/smoke.yml, then dispatch it (Actions tab -> "Self-hosted
+# runner smoke" -> Run workflow, or `gh workflow run smoke.yml`). It proves the
+# runner can check out the repo, run a shell step, run a Docker container, and
+# clean its own workspace. It is deliberately manual-only so it never competes
+# with real CI for the runner pool.
+#
+# PRIVATE-REPO ONLY: only run this while drc-dot-nz/paper-archives is private.
+# The runner refuses to serve a public repository (the guard and health checks
+# stop every service on a confirmed-public signal), so dispatching this against
+# a public repo will not produce a green run.
+name: Self-hosted runner smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Runner smoke
+    runs-on: [self-hosted, linux, x64, paper-archives]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Prove shell and workspace access
+        run: |
+          echo "Runner: ${RUNNER_NAME:-unknown} on ${RUNNER_OS:-unknown}"
+          echo "Workspace: ${GITHUB_WORKSPACE}"
+          test -d "${GITHUB_WORKSPACE}"
+          touch "${GITHUB_WORKSPACE}/smoke-marker"
+
+      - name: Prove Docker works
+        run: docker run --rm hello-world
+
+      - name: Clean the workspace
+        if: always()
+        run: rm -rf "${GITHUB_WORKSPACE}/smoke-marker"

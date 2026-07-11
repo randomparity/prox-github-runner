@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: github_runner
+  author: dave
+  description: Register N uniquely-named GitHub self-hosted runner services on the VM.
+  license: MIT
+  min_ansible_version: "2.21"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - noble
+dependencies: []

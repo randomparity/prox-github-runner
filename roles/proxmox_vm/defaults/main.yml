@@ -1,0 +1,70 @@
+---
+proxmox_vm_cpu: 16
+# CPU model exposed to the guest. The Proxmox default (kvm64) advertises a
+# minimal feature set that can break workloads expecting modern CPU features;
+# `host` passes the physical CPU through. Not live-migratable across dissimilar
+# hosts, which is acceptable for a single-node runner.
+proxmox_vm_cpu_type: host
+proxmox_vm_memory_mb: 32768
+proxmox_vm_disk_gb: 256
+proxmox_vm_vlan: "{{ proxmox_template_vlan | default(none) }}"
+proxmox_vm_lock_dir: "/var/lock/prox-github-runner-vm-{{ runner_vm_id }}.lock"
+# MAC pinned to the Proxmox OUI (BC:24:11) with the low three bytes derived from
+# the VM id, so the net0 converge is idempotent. Without an explicit MAC,
+# `qm set --net0` generates a fresh random MAC on every run, churning the address
+# and replugging a running NIC, which breaks the guest's cloud-init network.
+proxmox_vm_net0_mac: >-
+  BC:24:11:{{ '%02X:%02X:%02X' | format((runner_vm_id | int // 65536) % 256,
+  (runner_vm_id | int // 256) % 256, (runner_vm_id | int) % 256) }}
+# The ,firewall=1 NIC flag is what makes Proxmox apply the VM firewall (and thus
+# the .fw OUT REJECT deny-CIDR rules) to this interface; without it net0 traffic
+# is unfiltered even when the .fw file has [OPTIONS] enable: 1.
+proxmox_vm_net0: >-
+  virtio={{ proxmox_vm_net0_mac }},bridge={{ proxmox_template_bridge }}
+  {%- if proxmox_vm_vlan is not none -%},tag={{ proxmox_vm_vlan }}{%- endif -%}
+  ,firewall=1
+proxmox_vm_wait_for_ssh: true   # tests set false to skip the live SSH/cloud-init waits
+
+# SSH public key injected into the runner VM via cloud-init so Ansible can reach
+# it after first boot. Supply the operator's key at run time (a VM with no key is
+# unreachable, so an empty value fails validation). The key is written to a temp
+# file on the Proxmox host for `qm set --sshkeys`, then removed once qm has read
+# it into the VM's cloud-init config.
+proxmox_vm_ssh_pubkey: ""
+proxmox_vm_ssh_pubkey_file: "/tmp/prox-github-runner-{{ runner_vm_id }}.pub"
+proxmox_vm_fw_rules_path: "/etc/pve/firewall/{{ runner_vm_id }}.fw"
+# The .fw rules are rendered here first (a normal filesystem where atomic writes
+# work) then copied into pmxcfs; see the install task for why a direct write to
+# /etc/pve fails.
+proxmox_vm_fw_staging_path: "/tmp/prox-github-runner-fw-{{ runner_vm_id }}.fw"
+proxmox_vm_denied_cidrs:
+  - "{{ proxmox_api_host }}/32"
+  - "192.168.20.0/24"   # Proxmox management network (operator adjusts)
+# Amendment 4 (spec): documentation-only egress host list. The Proxmox firewall
+# is L3/L4 and cannot allowlist by hostname, so these are rendered as `#`
+# comments in the .fw file (not enforced) to record what the runner needs for
+# CI -- useful for an operator fronting the VM with an upstream egress proxy.
+# DNS (:53) and NTP (:123) are port-based, not hostnames, and are noted here
+# for completeness rather than listed as hosts.
+proxmox_vm_allowed_egress_hosts:
+  # GitHub API, git, and archive downloads (checkout, runner tarball).
+  - api.github.com
+  - github.com
+  - codeload.github.com
+  - objects.githubusercontent.com
+  # GitHub Actions cache service and its blob-storage backend (rust-cache).
+  - "*.actions.githubusercontent.com"
+  - "*.blob.core.windows.net"
+  # Ubuntu apt mirrors.
+  - archive.ubuntu.com
+  - security.ubuntu.com
+  # Docker registry.
+  - registry-1.docker.io
+  - auth.docker.io
+  # Rust toolchains and cargo registry.
+  - static.rust-lang.org
+  - index.crates.io
+  - static.crates.io
+  # Python package index and wheel CDN.
+  - pypi.org
+  - files.pythonhosted.org

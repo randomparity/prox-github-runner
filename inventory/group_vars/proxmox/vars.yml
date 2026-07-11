@@ -1,5 +1,9 @@
 ---
-proxmox_api_host: "192.168.20.10"
+# Site-specific Proxmox host. proxmox_api_host and proxmox_node are PLACEHOLDERS
+# (RFC 5737 documentation range / default node name); override the real values
+# in a gitignored local file, inventory/group_vars/proxmox/vars_local.yml, which
+# Ansible loads after this file. proxmox_api_host is the SSH target for the node.
+proxmox_api_host: "192.0.2.10"
 proxmox_api_port: 8006
 proxmox_node: "pve"
 proxmox_storage: "local-lvm"
@@ -15,4 +19,4 @@ proxmox_template_cloud_image_url: >-
   https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
 proxmox_template_cloud_image_filename: "noble-server-cloudimg-amd64.img"
 proxmox_template_cloud_image_checksum: >-
-  sha256:6e7016f2c9f4d3c00f48789eb6b9043ba2172ccc1b6b1eaf3ed1e29dd3e52bb3
+  sha256:5fa5b05e5ec239858c4531485d6023b0896448c2df7c63b34f8dae6ea6051a44

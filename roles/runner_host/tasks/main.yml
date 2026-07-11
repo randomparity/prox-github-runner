@@ -1,0 +1,156 @@
+---
+- name: Install baseline and Tauri packages
+  ansible.builtin.apt:
+    name: "{{ runner_host_packages + runner_host_tauri_libs }}"
+    state: present
+    update_cache: true
+  when: runner_host_apply_system | bool
+
+- name: Enable and start the QEMU guest agent
+  ansible.builtin.systemd:
+    name: qemu-guest-agent
+    enabled: true
+    state: started
+  when: runner_host_apply_system | bool
+
+- name: Create the runner user
+  ansible.builtin.user:
+    name: "{{ runner_host_user }}"
+    shell: /bin/bash
+    create_home: true
+    state: present
+  when: runner_host_apply_system | bool
+
+- name: Grant the runner user passwordless sudo
+  ansible.builtin.template:
+    src: runner-sudoers.j2
+    dest: "/etc/sudoers.d/10-{{ runner_host_user }}-runner"
+    mode: "0440"
+    validate: "visudo -cf %s"
+  when: runner_host_apply_system | bool
+
+- name: Ensure the apt keyrings directory exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+  when: runner_host_apply_system | bool
+
+- name: Install the Docker apt signing key
+  ansible.builtin.get_url:
+    url: "{{ runner_host_docker_gpg_url }}"
+    dest: "{{ runner_host_docker_gpg_path }}"
+    mode: "0644"
+  when: runner_host_apply_system | bool
+
+- name: Add the Docker apt repository
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: deb
+    uris: "{{ runner_host_docker_repo_uri }}"
+    suites: "{{ runner_host_docker_repo_suite }}"
+    components: "{{ runner_host_docker_repo_component }}"
+    architectures: amd64
+    signed_by: "{{ runner_host_docker_gpg_path }}"
+    state: present
+    enabled: true
+  when: runner_host_apply_system | bool
+
+- name: Install Docker Engine (docker-ce)
+  ansible.builtin.apt:
+    name: "{{ runner_host_docker_packages }}"
+    state: present
+    update_cache: true
+  when: runner_host_apply_system | bool
+
+- name: Enable and start the Docker service
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+  when: runner_host_apply_system | bool
+
+- name: Add the runner user to the docker group
+  ansible.builtin.user:
+    name: "{{ runner_host_user }}"
+    groups: docker
+    append: true
+  when: runner_host_apply_system | bool
+
+- name: Ensure the shared cargo registry directory exists
+  ansible.builtin.file:
+    path: "{{ runner_host_home }}/.cargo"
+    state: directory
+    owner: "{{ runner_host_user }}"
+    group: "{{ runner_host_user }}"
+    mode: "0755"
+  when: runner_host_apply_system | bool
+
+- name: Ensure the per-service environment directory exists
+  ansible.builtin.file:
+    path: "{{ runner_host_env_dir }}"
+    state: directory
+    mode: "0755"
+  when: runner_host_apply_system | bool
+
+- name: Create per-service work, tool-cache, and rustup directories
+  ansible.builtin.file:
+    path: "{{ runner_host_install_root }}/svc-{{ item[0] }}/{{ item[1] }}"
+    state: directory
+    owner: "{{ runner_host_user }}"
+    group: "{{ runner_host_user }}"
+    mode: "0755"
+  loop: >-
+    {{ range(1, (github_runner_count | int) + 1)
+       | product(['_work', '_tool', 'rustup']) | list }}
+  when: runner_host_apply_system | bool
+
+# Hand the whole install tree to the runner user (root created the intermediate
+# svc-* dirs). github_runner then downloads, unpacks, and registers as the
+# unprivileged runner user; only its svc.sh/systemd steps re-escalate.
+- name: Ensure the runner install tree is owned by the runner user
+  ansible.builtin.file:
+    path: "{{ runner_host_install_root }}"
+    state: directory
+    owner: "{{ runner_host_user }}"
+    group: "{{ runner_host_user }}"
+    recurse: true
+  when: runner_host_apply_system | bool
+
+- name: Render per-service environment files
+  ansible.builtin.template:
+    src: runner-env.j2
+    dest: "{{ runner_host_env_dir }}/svc-{{ item }}.env"
+    mode: "0644"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+  when: runner_host_apply_system | bool
+
+- name: Install the guard and cleanup scripts
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: "0755"
+  loop:
+    - src: prox-github-runner-guard.sh
+      dest: "{{ runner_host_guard_script }}"
+    - src: prox-github-runner-cleanup.sh
+      dest: "{{ runner_host_cleanup_script }}"
+  when: runner_host_apply_system | bool
+
+- name: Install the guard systemd service and timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    mode: "0644"
+  loop:
+    - prox-github-runner-guard.service
+    - prox-github-runner-guard.timer
+  when: runner_host_apply_system | bool
+
+- name: Enable and start the guard timer
+  ansible.builtin.systemd:
+    name: prox-github-runner-guard.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: runner_host_apply_system | bool

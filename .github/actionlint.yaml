@@ -1,0 +1,6 @@
+---
+# Custom self-hosted runner labels used by templates/paper-archives-smoke.yml
+# so actionlint does not flag them as unknown.
+self-hosted-runner:
+  labels:
+    - paper-archives

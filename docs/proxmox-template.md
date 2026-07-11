@@ -35,9 +35,9 @@ confirming the VMID is the failed template VM and not a real workload.
 
 ## Proxmox Requirements
 
-The role requires Proxmox VE 8.x because it imports the cloud image with
-`qm set --scsi0 <storage>:0,import-from=<path>`. The playbook checks
-`pveversion -v` before downloading the image or mutating a VM.
+The role requires Proxmox VE 8.x or 9.x because it imports the cloud image with
+`qm set --scsi0 <storage>:0,import-from=<path>` (available since PVE 8.2). The
+playbook checks `pveversion -v` before downloading the image or mutating a VM.
 
 The role also acquires a host-side lock directory before checking or creating
 the template:

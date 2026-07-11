@@ -1,0 +1,31 @@
+---
+# Full non-destructive converge chain: enforce preflight, ensure the Proxmox
+# template, provision the runner VM, then converge the host baseline and the
+# runner services. Reruns grow-only and never rebuild the VM by default.
+- name: Enforce GitHub runner preflight before provisioning
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - preflight
+
+- name: Ensure the Ubuntu cloud-init template exists on Proxmox
+  hosts: proxmox
+  gather_facts: false
+  roles:
+    - proxmox_template
+
+- name: Provision the runner VM
+  hosts: proxmox
+  gather_facts: false
+  roles:
+    - proxmox_vm
+
+- name: Converge the runner host baseline and runner services
+  hosts: runner
+  gather_facts: true
+  roles:
+    # become is scoped to runner_host (all system config); github_runner
+    # escalates selectively so config.sh stays unprivileged.
+    - role: runner_host
+      become: true
+    - github_runner

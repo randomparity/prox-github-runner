@@ -1,0 +1,172 @@
+---
+- name: Validate github_runner configuration
+  ansible.builtin.assert:
+    that:
+      - github_runner_target_repo is match('^[^/]+/[^/]+$')
+      - github_runner_labels | length > 0
+      - (github_runner_count | int) >= 1
+      - github_runner_version | length > 0
+      - github_runner_sha256 is match('^[0-9a-f]{64}$')
+    fail_msg: "Missing or invalid github_runner configuration."
+
+- name: Ensure the runner install root exists
+  ansible.builtin.file:
+    path: "{{ github_runner_install_root }}"
+    state: directory
+    mode: "0755"
+
+# Scale-down reconciliation: before scaling up, stop/unregister/remove any
+# discovered svc-* whose index exceeds github_runner_count so a lowered count
+# never leaves surplus services registered and job-eligible (spec Amendment 1).
+# A no-op when there is no surplus.
+- name: Reconcile surplus runner services down to the target count
+  ansible.builtin.import_tasks: unregister.yml
+
+- name: Discover existing runner registration state
+  ansible.builtin.find:
+    paths: "{{ github_runner_install_root }}"
+    patterns: ".runner"
+    recurse: true
+    hidden: true
+  register: github_runner_existing_state
+
+- name: Read existing runner registration state
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  loop: "{{ github_runner_existing_state.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: github_runner_state_blobs
+
+- name: Fail on a target-repo mismatch in existing registration state
+  ansible.builtin.fail:
+    msg: >-
+      Existing runner state at {{ item.item.path }} is registered to a
+      different repository than {{ github_runner_target_repo }}.
+      Run unregister-runner.yml before re-registering.
+  loop: "{{ github_runner_state_blobs.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+  when:
+    - item.content is defined
+    - github_runner_target_repo not in (item.content | b64decode)
+
+- name: Request a short-lived runner registration token
+  ansible.builtin.command:
+    argv:
+      - gh
+      - api
+      - --method
+      - POST
+      - -H
+      - "Accept: application/vnd.github+json"
+      - "/repos/{{ github_runner_target_repo }}/actions/runners/registration-token"
+  environment:
+    GH_TOKEN: "{{ vault_github_pat | default('') }}"
+  register: github_runner_token_result
+  changed_when: false
+  no_log: true
+  delegate_to: localhost
+  run_once: true
+
+- name: Extract the registration token into a transient fact
+  ansible.builtin.set_fact:
+    github_runner_reg_token: "{{ (github_runner_token_result.stdout | from_json).token }}"
+  no_log: true
+
+- name: Download and verify the pinned runner package
+  ansible.builtin.get_url:
+    url: "{{ github_runner_download_url }}"
+    dest: "{{ github_runner_install_root }}/{{ github_runner_tarball }}"
+    checksum: "sha256:{{ github_runner_sha256 }}"
+    mode: "0644"
+
+- name: Ensure each runner service directory exists
+  ansible.builtin.file:
+    path: "{{ github_runner_install_root }}/svc-{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+
+- name: Unpack the runner package into each service directory
+  ansible.builtin.unarchive:
+    src: "{{ github_runner_install_root }}/{{ github_runner_tarball }}"
+    dest: "{{ github_runner_install_root }}/svc-{{ item }}"
+    remote_src: true
+    creates: "{{ github_runner_install_root }}/svc-{{ item }}/config.sh"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+
+- name: Detect existing per-service registration state
+  ansible.builtin.stat:
+    path: "{{ github_runner_install_root }}/svc-{{ item }}/.runner"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+  register: github_runner_svc_state
+
+- name: Register each runner service with a unique name
+  ansible.builtin.command:
+    chdir: "{{ github_runner_install_root }}/svc-{{ item.item }}"
+    argv:
+      - ./config.sh
+      - --url
+      - "https://github.com/{{ github_runner_target_repo }}"
+      - --token
+      - "{{ github_runner_reg_token }}"
+      - --name
+      - "{{ github_runner_name_prefix }}-{{ item.item }}"
+      - --labels
+      - "{{ github_runner_labels | join(',') }}"
+      - --unattended
+      - --disableupdate
+  loop: "{{ github_runner_svc_state.results }}"
+  loop_control:
+    label: "svc-{{ item.item }}"
+  when: not item.stat.exists
+  changed_when: true
+  no_log: true
+
+- name: Install each runner service unit
+  ansible.builtin.command:
+    chdir: "{{ github_runner_install_root }}/svc-{{ item.item }}"
+    argv: ["./svc.sh", "install", "{{ runner_bootstrap_user }}"]
+  become: "{{ github_runner_become | bool }}"
+  loop: "{{ github_runner_svc_state.results }}"
+  loop_control:
+    label: "svc-{{ item.item }}"
+  when: not item.stat.exists
+  changed_when: true
+
+- name: Create the per-service job marker directory
+  ansible.builtin.file:
+    path: "{{ github_runner_jobs_dir }}"
+    state: directory
+    mode: "0755"
+    owner: "{{ runner_bootstrap_user }}"
+    group: "{{ runner_bootstrap_user }}"
+  become: "{{ github_runner_become | bool }}"
+  when: github_runner_apply_system | bool
+
+- name: Install the per-service job hook scripts
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ github_runner_bin_dir }}/{{ item }}"
+    mode: "0755"
+  become: "{{ github_runner_become | bool }}"
+  loop:
+    - prox-github-runner-job-started.sh
+    - prox-github-runner-job-completed.sh
+  when: github_runner_apply_system | bool
+
+- name: Wire per-service job hooks via the runner .env
+  ansible.builtin.template:
+    src: runner-hooks.env.j2
+    dest: "{{ github_runner_install_root }}/svc-{{ item }}/.env"
+    mode: "0644"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+
+- name: Start each runner service
+  ansible.builtin.command:
+    chdir: "{{ github_runner_install_root }}/svc-{{ item }}"
+    argv: ["./svc.sh", "start"]
+  become: "{{ github_runner_become | bool }}"
+  loop: "{{ range(1, (github_runner_count | int) + 1) | list }}"
+  changed_when: true
