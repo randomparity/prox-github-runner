@@ -1,0 +1,9 @@
+{{ ansible_managed | comment }}
+# Recreates the tmpfs runtime tree on every boot. /run is tmpfs, so the job
+# marker directory created once at converge time is lost on reboot; without
+# this rule the unprivileged Pre Job Hook (ACTIONS_RUNNER_HOOK_JOB_STARTED)
+# cannot mkdir under the root-owned parent and every job fails at "Set up
+# runner". The jobs subdir is owned by the runner user so the hook can write
+# its per-service marker; the parent stays root-owned for the guard's state.
+d {{ runner_host_state_dir }} 0755 root root -
+d {{ runner_host_jobs_dir }} 0755 {{ runner_host_user }} {{ runner_host_user }} -

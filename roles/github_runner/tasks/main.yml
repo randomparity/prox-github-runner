@@ -135,16 +135,6 @@
   when: not item.stat.exists
   changed_when: true
 
-- name: Create the per-service job marker directory
-  ansible.builtin.file:
-    path: "{{ github_runner_jobs_dir }}"
-    state: directory
-    mode: "0755"
-    owner: "{{ runner_bootstrap_user }}"
-    group: "{{ runner_bootstrap_user }}"
-  become: "{{ github_runner_become | bool }}"
-  when: github_runner_apply_system | bool
-
 - name: Install the per-service job hook scripts
   ansible.builtin.copy:
     src: "{{ item }}"
