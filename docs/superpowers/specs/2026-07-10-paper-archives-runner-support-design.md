@@ -71,16 +71,22 @@ service:
 
 - is its own `actions.runner.*` systemd unit with a unique runner name
   `<vm-hostname>-<index>` (1..N), its own `_work` directory, its own
-  `RUNNER_TOOL_CACHE` (the per-runner `_work/_tool` default), and its own
-  `RUSTUP_HOME`, so concurrent `actions/setup-python` extractions and
-  `rustup toolchain install` runs (up to `github_runner_count` (3–4) concurrent
-  `nightly` installs when `fuzz-smoke` instances co-schedule) never race a
-  shared cache or toolchain store;
-- shares `~/.cargo/registry` (cargo's own file locks make concurrent reads
-  safe), the pre-installed Tauri libs, and the single Docker daemon. The
-  registry is shared for cache reuse; the *toolchain* store (`RUSTUP_HOME`) is
-  not, because `rustup` install/update writes are less tolerant of concurrent
-  mutation than cargo's locked registry reads;
+  `RUNNER_TOOL_CACHE` (the per-runner `_work/_tool` default), its own
+  `RUSTUP_HOME`, and its own `CARGO_HOME`, so concurrent `actions/setup-python`
+  extractions and `rustup toolchain install` / cargo runs (up to
+  `github_runner_count` (3–4) concurrent installs when `fuzz-smoke` instances
+  co-schedule) never race a shared cache or toolchain store;
+- shares the pre-installed Tauri libs and the single Docker daemon. **Amendment:
+  `CARGO_HOME` is per-service, not a shared `~/.cargo/registry`.** The original
+  design shared the registry for cache reuse on the theory that cargo's
+  package-cache lock makes concurrent access safe; in practice a shared
+  `CARGO_HOME` also shares the `rustup` **proxies** in `CARGO_HOME/bin`, which
+  every `dtolnay/rust-toolchain` run rewrites — a peer job's toolchain churn then
+  breaks rustc resolution mid-build (rustc `execve` → ENOENT) even with an
+  isolated `RUSTUP_HOME`. Both env vars are delivered via the job-injected runner
+  `.env` (not an `EnvironmentFile`). Cache reuse now relies on
+  `Swatinem/rust-cache`'s GitHub-hosted cache rather than a shared on-disk
+  registry;
 - registers with labels `self-hosted,linux,x64,paper-archives`.
 
 The `<vm-hostname>-<index>` naming is required, not cosmetic: GitHub runner

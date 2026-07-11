@@ -101,9 +101,8 @@ def test_per_service_dir_isolation(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stdout
     tasks = Path("roles/runner_host/tasks/main.yml").read_text()
     assert "range(1, (github_runner_count | int) + 1)" in tasks
-    # runner_host creates the per-service rustup + tool-cache dirs and the shared
-    # cargo registry dir. The env vars pointing jobs at them are emitted by the
-    # github_runner role's runner .env (see test_github_runner_role), not by an
-    # unwired EnvironmentFile.
-    assert "product(['_work', '_tool', 'rustup'])" in tasks
-    assert "{{ runner_host_home }}/.cargo" in tasks
+    # runner_host creates the per-service rustup + tool-cache + cargo dirs. The env
+    # vars pointing jobs at them are emitted by the github_runner role's runner .env
+    # (see test_github_runner_role), not by an unwired EnvironmentFile. CARGO_HOME is
+    # per-service too, so no shared ~/.cargo is created.
+    assert "product(['_work', '_tool', 'rustup', '.cargo'])" in tasks
