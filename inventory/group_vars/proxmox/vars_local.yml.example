@@ -1,6 +1,0 @@
----
-# Copy this file to vars_local.yml (which is gitignored) and set your site's
-# real values. vars_local.yml is loaded after vars.yml, so the keys here
-# override the placeholders there. proxmox_api_host is the node's SSH target.
-proxmox_api_host: "10.0.0.10"
-proxmox_node: "pve"

@@ -1,0 +1,11 @@
+---
+# Copy to vars_local.yml (gitignored) and set this site's real values. Loaded
+# after vars.yml, so these keys override the placeholders there.
+proxmox_api_host: "10.0.0.10"
+proxmox_node: "pve"
+runner_vm_id: 99
+runner_vm_name: "pa-runner"
+runner_vm_ip: "10.0.0.99"
+runner_vm_gateway: "10.0.0.1"
+runner_vm_nameserver: "10.0.0.1"
+runner_vm_searchdomain: "example.lan"
