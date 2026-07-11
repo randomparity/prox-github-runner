@@ -268,6 +268,16 @@ def test_registers_three_unique_labeled_services_with_hooks(tmp_path: Path) -> N
     assert "CARGO_HOME=/home/runner/.cargo" in env_body
 
 
+def test_env_change_restarts_runner_services() -> None:
+    # A changed .env must restart the service, or the running listener keeps the
+    # stale environment (the .env is read only at process start).
+    tasks = Path("roles/github_runner/tasks/main.yml").read_text()
+    assert "notify: Restart runner services" in tasks
+    handlers = Path("roles/github_runner/handlers/main.yml").read_text()
+    assert "Restart runner services" in handlers
+    assert "state: restarted" in handlers
+
+
 def _place_registered_service(install_root: Path, idx: int) -> None:
     svc = install_root / f"svc-{idx}"
     svc.mkdir(parents=True)
